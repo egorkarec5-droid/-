@@ -35,8 +35,11 @@ class CheckoDirector:
     name: str
     inn: str = ""
     post: str = ""
-    start_date: str = ""
+    record_date: str = ""
     end_date: str = ""
+    unreliable: bool = False
+    is_mass: bool = False
+    disqualified: bool = False
 
 
 @dataclass
@@ -45,6 +48,8 @@ class CheckoFounder:
     inn: str = ""
     share: str = ""
     kind: str = ""   # физлицо / рос. организация / иностр. организация / ПИФ / РФ
+    unreliable: bool = False
+    is_mass: bool = False
 
 
 @dataclass
@@ -169,9 +174,12 @@ def _parse_company(data: dict) -> CheckoCompany:
         directors.append(CheckoDirector(
             name=item.get("ФИО", ""),
             inn=item.get("ИНН", ""),
-            post=item.get("Должность", ""),
-            start_date=item.get("ДатаНач", ""),
+            post=item.get("НаимДолжн", "") or item.get("ВидДолжн", ""),
+            record_date=item.get("ДатаЗаписи", ""),
             end_date=item.get("ДатаКон", ""),
+            unreliable=bool(item.get("Недост")),
+            is_mass=bool(item.get("МассРуковод")),
+            disqualified=bool(item.get("ДисквЛицо")),
         ))
 
     founders = []
@@ -185,11 +193,15 @@ def _parse_company(data: dict) -> CheckoCompany:
         return str(d) if d else ""
 
     for item in (uchred.get("ФЛ") or []):
-        founders.append(CheckoFounder(name=item.get("ФИО", ""), inn=item.get("ИНН", ""), share=_share(item), kind="физлицо"))
+        founders.append(CheckoFounder(
+            name=item.get("ФИО", ""), inn=item.get("ИНН", ""), share=_share(item), kind="физлицо",
+            unreliable=bool(item.get("Недост")), is_mass=bool(item.get("МассУчред")),
+        ))
     for item in (uchred.get("РосОрг") or []):
         founders.append(CheckoFounder(
             name=item.get("НаимСокр", "") or item.get("НаимПолн", ""),
             inn=item.get("ИНН", ""), share=_share(item), kind="рос. организация",
+            unreliable=bool(item.get("Недост")), is_mass=bool(item.get("МассУчред")),
         ))
     for item in (uchred.get("ИнОрг") or []):
         founders.append(CheckoFounder(name=item.get("НаимПолн", ""), share=_share(item), kind="иностр. организация"))
@@ -239,4 +251,4 @@ def _parse_company(data: dict) -> CheckoCompany:
         phones=contacts.get("Тел", []) or [],
         emails=contacts.get("Емэйл", []) or [],
         raw=data,
-    )
+    )   
