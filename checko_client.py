@@ -10,6 +10,10 @@ from dataclasses import dataclass, field
 
 CHECKO_URL = "https://api.checko.ru/v2/company"
 CHECKO_FINANCES_URL = "https://api.checko.ru/v2/finances"
+CHECKO_ENFORCEMENTS_URL = "https://api.checko.ru/v2/enforcements"
+CHECKO_SEARCH_URL = "https://api.checko.ru/v2/search"
+CHECKO_LEGAL_CASES_URL = "https://api.checko.ru/v2/legal-cases"
+CHECKO_INSPECTIONS_URL = "https://api.checko.ru/v2/inspections"
 
 
 class CheckoError(Exception):
@@ -129,6 +133,163 @@ async def get_finances(inn: str, api_key: str) -> tuple[list[FinanceYear], dict]
             assets=_to_float(values.get("1600")),
         ))
     return years, data
+
+
+@dataclass
+class Enforcement:
+    number: str
+    date: str
+    subject: str          # предмет исполнения
+    debt_sum: float | None
+    debt_remaining: float | None
+    bailiff_office: str
+
+
+@dataclass
+class SearchHit:
+    inn: str
+    ogrn: str
+    name_short: str
+    status: str
+    address: str
+    reg_date: str
+
+
+async def get_enforcements(inn: str, api_key: str) -> list[Enforcement]:
+    """Исполнительные производства ФССП — /v2/enforcements. Схема подтверждена документацией."""
+    async with aiohttp.ClientSession() as session:
+        async with session.get(CHECKO_ENFORCEMENTS_URL, params={"key": api_key, "inn": inn}) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                raise CheckoError(f"Checko (enforcements) вернул {resp.status}: {text[:300]}")
+            payload = await resp.json()
+
+    if payload.get("meta", {}).get("status") not in (None, "ok"):
+        raise CheckoError(f"Checko (enforcements): {payload.get('meta')}")
+
+    records = (payload.get("data") or {}).get("Записи") or []
+    return [
+        Enforcement(
+            number=r.get("ИспПрНомер", ""),
+            date=r.get("ИспПрДата", ""),
+            subject=r.get("ПредмИсп", ""),
+            debt_sum=_to_float(r.get("СумДолг")),
+            debt_remaining=_to_float(r.get("ОстЗадолж")),
+            bailiff_office=r.get("СудПристНаим", ""),
+        )
+        for r in records
+    ]
+
+
+async def search_by_name(query: str, api_key: str, limit: int = 8) -> list[SearchHit]:
+    """Поиск организаций по названию — /v2/search. Схема подтверждена документацией."""
+    params = {"key": api_key, "by": "name", "obj": "org", "query": query, "limit": str(limit)}
+    async with aiohttp.ClientSession() as session:
+        async with session.get(CHECKO_SEARCH_URL, params=params) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                raise CheckoError(f"Checko (search) вернул {resp.status}: {text[:300]}")
+            payload = await resp.json()
+
+    if payload.get("meta", {}).get("status") not in (None, "ok"):
+        raise CheckoError(f"Checko (search): {payload.get('meta')}")
+
+    records = (payload.get("data") or {}).get("Записи") or []
+    return [
+        SearchHit(
+            inn=r.get("ИНН", ""),
+            ogrn=r.get("ОГРН", ""),
+            name_short=r.get("НаимСокр", ""),
+            status=r.get("Статус", ""),
+            address=r.get("ЮрАдрес", ""),
+            reg_date=r.get("ДатаРег", ""),
+        )
+        for r in records
+    ]
+
+
+@dataclass
+class LegalCase:
+    number: str
+    date: str
+    court: str
+    role: str          # "истец" | "ответчик"
+    claim_sum: float | None
+    kad_url: str = ""
+
+
+@dataclass
+class LegalCasesSummary:
+    cases: list[LegalCase]
+    total_claim_sum: float
+
+
+@dataclass
+class Inspection:
+    number: str
+    status: str
+    completed: bool
+    violations_found: bool
+    start_date: str
+    end_date: str
+    purpose: str
+    control_org: str
+
+
+async def get_legal_cases(inn: str, api_key: str) -> LegalCasesSummary:
+    """Арбитражные дела — /v2/legal-cases. Схема подтверждена документацией."""
+    async with aiohttp.ClientSession() as session:
+        async with session.get(CHECKO_LEGAL_CASES_URL, params={"key": api_key, "inn": inn, "limit": "100"}) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                raise CheckoError(f"Checko (legal-cases) вернул {resp.status}: {text[:300]}")
+            payload = await resp.json()
+
+    if payload.get("meta", {}).get("status") not in (None, "ok"):
+        raise CheckoError(f"Checko (legal-cases): {payload.get('meta')}")
+
+    data = payload.get("data") or {}
+    records = data.get("Записи") or []
+    cases = []
+    for r in records:
+        is_defendant = any(p.get("ИНН") == inn for p in (r.get("Ответ") or []))
+        cases.append(LegalCase(
+            number=r.get("Номер", ""),
+            date=r.get("Дата", ""),
+            court=r.get("Суд", ""),
+            role="ответчик" if is_defendant else "истец",
+            claim_sum=_to_float(r.get("СуммИск")),
+            kad_url=r.get("СтрКАД", ""),
+        ))
+    return LegalCasesSummary(cases=cases, total_claim_sum=_to_float(data.get("ОбщСуммИск")) or 0.0)
+
+
+async def get_inspections(inn: str, api_key: str) -> list[Inspection]:
+    """Проверки (ФГИС "Единый реестр проверок") — /v2/inspections. Схема подтверждена документацией."""
+    async with aiohttp.ClientSession() as session:
+        async with session.get(CHECKO_INSPECTIONS_URL, params={"key": api_key, "inn": inn, "limit": "100"}) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                raise CheckoError(f"Checko (inspections) вернул {resp.status}: {text[:300]}")
+            payload = await resp.json()
+
+    if payload.get("meta", {}).get("status") not in (None, "ok"):
+        raise CheckoError(f"Checko (inspections): {payload.get('meta')}")
+
+    records = (payload.get("data") or {}).get("Записи") or []
+    return [
+        Inspection(
+            number=r.get("Номер", ""),
+            status=r.get("Статус", ""),
+            completed=bool(r.get("Заверш")),
+            violations_found=bool(r.get("Наруш")),
+            start_date=r.get("ДатаНач", ""),
+            end_date=r.get("ДатаОконч", ""),
+            purpose=r.get("Цель", ""),
+            control_org=(r.get("ОргКонтр") or {}).get("Наим", ""),
+        )
+        for r in records
+    ]
 
 
 async def get_company(inn: str, api_key: str) -> CheckoCompany | None:
