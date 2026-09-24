@@ -22,7 +22,7 @@ from rules import assess_all
 from report import format_summary_line, format_top_risks, DISCLAIMER
 from card import build_card, format_card
 from dadata_client import get_party, DaDataError
-from checko_client import get_company, get_finances, CheckoError
+from checko_client import get_company, get_finances, search_by_name, CheckoError
 
 router = Router()
 
@@ -91,6 +91,41 @@ async def cmd_start(message: Message):
 @router.message(F.text == "ℹ️ Помощь")
 async def cmd_help(message: Message):
     await message.answer(HELP_TEXT)
+
+
+@router.message(F.text == "⚙️ Настройки")
+async def cmd_settings(message: Message):
+    is_owner = message.from_user.id == OWNER_ID
+    lines = [
+        "<b>⚙️ Настройки</b>",
+        "",
+        "Доступ: без ограничений (тестовый режим, подписка ещё не подключена).",
+    ]
+    if is_owner:
+        lines.append("")
+        lines.append("Вы — владелец бота. Админ-панель: /admin")
+    await message.answer("\n".join(lines))
+
+
+@router.message(F.text.startswith("/admin"))
+async def cmd_admin(message: Message):
+    if message.from_user.id != OWNER_ID:
+        return
+    me = await message.bot.get_me()
+    invite_link = f"https://t.me/{me.username}?start=friend"
+    lines = [
+        "<b>🛠 Админ-панель</b>",
+        "",
+        "⚠️ Пока без базы данных (Этап 3) — статистика и список пользователей "
+        "появятся, когда подключим хранилище. Сейчас доступно:",
+        "",
+        f"🔗 Пригласить (бесплатный доступ): {invite_link}",
+        "",
+        "👥 Пользователи — недоступно (нет БД)",
+        "📊 Статистика — недоступно (нет БД)",
+        "✅ Заявки на оплату — недоступно (оплата пока не подключена)",
+    ]
+    await message.answer("\n".join(lines))
 
 
 @router.message(F.text == "📊 Проверить книгу")
@@ -178,12 +213,38 @@ async def start_counterparty_check(message: Message, state: FSMContext):
     await message.answer("Введите ИНН организации или ИП (10 или 12 цифр).")
 
 
-@router.message(CardStates.waiting_inn, F.text, ~F.text.startswith("/"))
+MENU_TEXTS = {"📊 Проверить книгу", "🔍 Проверить контрагента", "📋 Список ИНН", "⚙️ Настройки", "ℹ️ Помощь"}
+
+
+@router.message(CardStates.waiting_inn, F.text, ~F.text.startswith("/"), ~F.text.in_(MENU_TEXTS))
 async def receive_inn(message: Message, state: FSMContext):
-    inn = message.text.strip()
-    if not _is_valid_inn(inn):
-        await message.answer("Это не похоже на ИНН — нужно 10 цифр (юрлицо) или 12 цифр (ИП). Попробуйте ещё раз.")
-        return
+    query = message.text.strip()
+
+    if not _is_valid_inn(query):
+        if len(query) < 4:
+            await message.answer("Слишком короткий запрос — нужно минимум 4 символа для поиска по названию, либо ИНН.")
+            return
+        await message.answer("⏳ Ищу по названию...")
+        try:
+            hits = await search_by_name(query, CHECKO_API_KEY)
+        except Exception as e:
+            logging.exception("Ошибка поиска по названию %s", query)
+            await message.answer(f"❌ Не удалось выполнить поиск: {e}")
+            return
+
+        if not hits:
+            await message.answer("Ничего не нашёл по этому названию. Попробуйте иначе или введите ИНН напрямую.")
+            return
+        if len(hits) == 1:
+            inn = hits[0].inn
+        else:
+            lines = ["Нашёл несколько совпадений — пришлите ИНН нужной организации:\n"]
+            for h in hits:
+                lines.append(f"{h.name_short} — ИНН {h.inn}, {h.status}, {h.address}")
+            await message.answer("\n".join(lines))
+            return
+    else:
+        inn = query
 
     await message.answer("⏳ Ищу данные...")
     try:
@@ -194,7 +255,7 @@ async def receive_inn(message: Message, state: FSMContext):
         text = f"❌ Не удалось получить данные по ИНН {inn}: {e}\nПопробуйте ещё раз или другой ИНН."
 
     await message.answer(text, reply_markup=main_menu)
-    await message.answer("Введите следующий ИНН, или выберите другое действие кнопкой ниже.")
+    await message.answer("Введите следующий ИНН или название, или выберите другое действие кнопкой ниже.")
     # состояние остаётся waiting_inn — можно проверять несколько ИНН подряд
     # без повторного нажатия кнопки; любая другая кнопка меню сбросит его сама
 
