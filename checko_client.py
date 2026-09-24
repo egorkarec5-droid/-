@@ -215,6 +215,7 @@ class LegalCase:
     court: str
     role: str          # "истец" | "ответчик"
     claim_sum: float | None
+    uuid: str = ""
     kad_url: str = ""
 
 
@@ -259,6 +260,7 @@ async def get_legal_cases(inn: str, api_key: str) -> LegalCasesSummary:
             court=r.get("Суд", ""),
             role="ответчик" if is_defendant else "истец",
             claim_sum=_to_float(r.get("СуммИск")),
+            uuid=r.get("UUID", ""),
             kad_url=r.get("СтрКАД", ""),
         ))
     return LegalCasesSummary(cases=cases, total_claim_sum=_to_float(data.get("ОбщСуммИск")) or 0.0)
