@@ -97,6 +97,15 @@ def format_card(result: CardResult) -> str:
         lines.append("<b>Руководитель</b>")
         m = d.management
         lines.append(f"{m.name}" + (f" (ИНН {m.inn})" if m.inn else ""))
+        if c and c.managing_org and c.managing_org.inn == m.inn:
+            tag = " 🔴 недостоверность" if c.managing_org.unreliable else ""
+            lines.append(f"(управляющая организация{tag})")
+    elif c and c.managing_org:
+        lines.append("")
+        lines.append("<b>Руководитель</b>")
+        mo = c.managing_org
+        tag = " 🔴 недостоверность" if mo.unreliable else ""
+        lines.append(f"{mo.name} (ИНН {mo.inn}) — управляющая организация{tag}")
 
     if d and d.founders:
         lines.append("")
@@ -132,6 +141,29 @@ def format_card(result: CardResult) -> str:
     elif result.checko_error:
         lines.append("")
         lines.append(f"⚠️ Checko недоступна: {result.checko_error}")
+
+    if c:
+        flag_lines = []
+        if c.flags.disqualified_person:
+            flag_lines.append("🔴 В руководстве — дисквалифицированное лицо")
+        if c.flags.mass_director:
+            flag_lines.append("🔴 Директор — массовый (числится ещё во многих организациях)")
+        if c.flags.mass_founder:
+            flag_lines.append("🔴 Учредитель — массовый")
+        if c.flags.unfair_supplier:
+            flag_lines.append("🔴 В реестре недобросовестных поставщиков")
+        if c.flags.sanctions:
+            flag_lines.append("🔴 Организация под санкциями")
+        if c.flags.sanctions_founder:
+            flag_lines.append("🟡 Учредитель под санкциями")
+        if c.flags.illegal_finance:
+            flag_lines.append("🔴 Признаки нелегальных финансовых операций")
+        if c.flags.in_bankruptcy_registry:
+            flag_lines.append("🔴 Есть записи в реестре банкротств (ЕФРСБ)")
+        if flag_lines:
+            lines.append("")
+            lines.append("<b>Флаги риска</b>")
+            lines.extend(flag_lines)
 
     lines.append("")
     lines.append(
