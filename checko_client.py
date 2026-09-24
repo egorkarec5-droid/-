@@ -36,6 +36,12 @@ class CheckoCompany:
     employee_count: int | None
     taxes_paid: float | None
     gov_contracts_sum: float | None
+    reg_date: str
+    region: str
+    address: str
+    address_unreliable: bool    # ЮрАдрес.Недост — признак недостоверности в ЕГРЮЛ
+    mass_address_count: int     # сколько ещё организаций на этом адресе
+    okved_name: str
     finances: list[FinanceYear] = field(default_factory=list)
     phones: list[str] = field(default_factory=list)
     emails: list[str] = field(default_factory=list)
@@ -72,17 +78,27 @@ def _parse_company(data: dict) -> CheckoCompany:
         ))
 
     contacts = data.get("Контакты") or {}
+    yur_adres = data.get("ЮрАдрес") or {}
+    okved = data.get("ОКВЭД") or {}
+    smb = data.get("РМСП")
 
     return CheckoCompany(
-        name_short=data.get("НаимСокрЮЛ", "") or data.get("НаимСокрИП", ""),
+        # подтверждено реальным ответом: правильный ключ "НаимСокр", не "НаимСокрЮЛ"
+        name_short=data.get("НаимСокр", "") or data.get("НаимПолн", ""),
         status=(data.get("Статус") or {}).get("Наим", ""),
         capital=(data.get("УстКап") or {}).get("Сумма"),
         tax_system=(data.get("СведНО") or {}).get("СпецРежим", ""),
-        is_smb=bool(data.get("РМСП")),
-        smb_category=(data.get("РМСП") or {}).get("Кат", "") if isinstance(data.get("РМСП"), dict) else "",
+        is_smb=bool(smb),
+        smb_category=(smb or {}).get("Кат", "") if isinstance(smb, dict) else "",
         employee_count=(data.get("Числ") or {}).get("Числ"),
         taxes_paid=(data.get("СведНО") or {}).get("СумУпл"),
         gov_contracts_sum=(data.get("Контракты") or {}).get("СумГК"),
+        reg_date=data.get("ДатаРег", ""),
+        region=(data.get("Регион") or {}).get("Наим", ""),
+        address=yur_adres.get("АдресРФ", ""),
+        address_unreliable=bool(yur_adres.get("Недост")),
+        mass_address_count=len(yur_adres.get("МассАдрес") or []),
+        okved_name=okved.get("Наим", ""),
         finances=finance_years,
         phones=contacts.get("Тел", []) or [],
         emails=contacts.get("Емэйл", []) or [],
