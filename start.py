@@ -50,6 +50,13 @@ class BookStates(StatesGroup):
     waiting_files = State()
  
  
+# Отслеживаем полученные файлы вне FSMContext, под блокировкой — чтобы два
+# параллельных скачивания (покупки+продажи почти одновременно) не перезаписали
+# друг друга при записи состояния (race condition).
+_pending_books: dict[int, dict] = {}
+_pending_lock = asyncio.Lock()
+ 
+ 
 @router.message(CommandStart())
 async def cmd_start(message: Message):
     await message.answer(WELCOME, reply_markup=main_menu)
@@ -63,7 +70,7 @@ async def cmd_help(message: Message):
 @router.message(F.text == "📊 Проверить книгу")
 async def start_book_check(message: Message, state: FSMContext):
     await state.set_state(BookStates.waiting_files)
-    await state.update_data(purchases_path=None, sales_path=None)
+    _pending_books[message.from_user.id] = {}
     await message.answer(
         "Пришлите оба файла — книгу покупок (Раздел 8) и книгу продаж (Раздел 9). "
         "Можно в любом порядке, я сам определю, где какая."
@@ -92,29 +99,24 @@ async def receive_book_file(message: Message, state: FSMContext):
         )
         return
  
-    data = await state.get_data()
-    if book_type == "purchases":
-        if data.get("purchases_path"):
-            await message.answer(
-                "⚠️ Это снова похоже на книгу покупок — уже получена ранее. "
-                "Жду книгу продаж (Раздел 9)."
-            )
-        else:
-            await message.answer("✅ Книга покупок получена.")
-        data["purchases_path"] = local_path
-    else:
-        if data.get("sales_path"):
-            await message.answer(
-                "⚠️ Это снова похоже на книгу продаж — уже получена ранее. "
-                "Жду книгу покупок (Раздел 8)."
-            )
-        else:
-            await message.answer("✅ Книга продаж получена.")
-        data["sales_path"] = local_path
-    await state.update_data(**data)
+    user_id = message.from_user.id
+    async with _pending_lock:
+        slot = _pending_books.setdefault(user_id, {})
+        was_already_set = book_type in slot
+        slot[book_type] = local_path
+        both_ready = "purchases" in slot and "sales" in slot
  
-    if data.get("purchases_path") and data.get("sales_path"):
-        await run_analysis(message, state, data["purchases_path"], data["sales_path"])
+    label = "покупок" if book_type == "purchases" else "продаж"
+    other_label = "продаж" if book_type == "purchases" else "покупок"
+    if was_already_set:
+        await message.answer(f"⚠️ Это снова похоже на книгу {label} — уже получена ранее. Жду книгу {other_label}.")
+    else:
+        await message.answer(f"✅ Книга {label} получена.")
+ 
+    if both_ready:
+        await run_analysis(message, state, slot["purchases"], slot["sales"])
+        async with _pending_lock:
+            _pending_books.pop(user_id, None)
  
  
 async def run_analysis(message: Message, state: FSMContext, purchases_path: str, sales_path: str):
