@@ -73,11 +73,22 @@ def format_card(result: CardResult) -> str:
     lines.append("<b>Основное</b>")
     if d:
         lines.append(f"Статус: {STATUS_LABELS.get(d.status, d.status or '—')}")
-        lines.append(f"Адрес: {d.address or '—'}" + (" ⚠️ признаки массового адреса" if d.address_is_mass else ""))
-        if d.okved_name:
-            lines.append(f"ОКВЭД: {d.okved} {d.okved_name}")
+        addr_flags = []
+        if d.address_is_mass:
+            addr_flags.append("⚠️ признаки массового адреса")
+        if c and c.address_unreliable:
+            addr_flags.append("🔴 недостоверность в ЕГРЮЛ")
+        addr_suffix = (" " + " ".join(addr_flags)) if addr_flags else ""
+        lines.append(f"Адрес: {d.address or (c.address if c else '—')}{addr_suffix}")
+        if c and c.mass_address_count:
+            lines.append(f"На этом адресе ещё организаций: {c.mass_address_count}")
+        okved_name = d.okved_name or (c.okved_name if c else "")
+        if d.okved or okved_name:
+            lines.append(f"ОКВЭД: {d.okved} {okved_name}".strip())
         if d.registration_date:
             lines.append(f"Регистрация: {d.registration_date}")
+        if c and c.region:
+            lines.append(f"Регион: {c.region}")
     else:
         lines.append(f"⚠️ DaData недоступна: {result.dadata_error or 'нет данных'}")
 
