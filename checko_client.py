@@ -9,6 +9,7 @@ import aiohttp
 from dataclasses import dataclass, field
 
 CHECKO_URL = "https://api.checko.ru/v2/company"
+CHECKO_FINANCES_URL = "https://api.checko.ru/v2/finances"
 
 
 class CheckoError(Exception):
@@ -96,6 +97,35 @@ class CheckoCompany:
     phones: list[str] = field(default_factory=list)
     emails: list[str] = field(default_factory=list)
     raw: dict = field(default_factory=dict)
+
+
+async def get_finances(inn: str, api_key: str) -> tuple[list[FinanceYear], dict]:
+    """Отдельный метод Checko — /v2/finances. Схема ответа не подтверждена
+    примером, парсим по аналогии с блоком "Финансы" внутри /company:
+    предполагаем словарь по годам с ключами Выручка/ЧистПрибыль/Актив.
+    Если структура иная — вернём пустой список, raw останется для сверки."""
+    async with aiohttp.ClientSession() as session:
+        async with session.get(CHECKO_FINANCES_URL, params={"key": api_key, "inn": inn}) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                raise CheckoError(f"Checko (finances) вернул {resp.status}: {text[:300]}")
+            payload = await resp.json()
+
+    if payload.get("meta", {}).get("status") not in (None, "ok"):
+        raise CheckoError(f"Checko (finances): {payload.get('meta')}")
+
+    data = payload.get("data") or {}
+    years = []
+    for year_str, values in sorted(data.items()):
+        if not str(year_str).isdigit() or not isinstance(values, dict):
+            continue
+        years.append(FinanceYear(
+            year=int(year_str),
+            revenue=_to_float(values.get("Выручка")),
+            profit=_to_float(values.get("ЧистПрибыль")),
+            assets=_to_float(values.get("Актив")),
+        ))
+    return years, data
 
 
 async def get_company(inn: str, api_key: str) -> CheckoCompany | None:
@@ -251,4 +281,4 @@ def _parse_company(data: dict) -> CheckoCompany:
         phones=contacts.get("Тел", []) or [],
         emails=contacts.get("Емэйл", []) or [],
         raw=data,
-    )   
+    )
