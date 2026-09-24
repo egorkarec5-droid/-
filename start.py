@@ -6,7 +6,7 @@ import tempfile
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -21,6 +21,7 @@ from parser import parse_pokupki, parse_prodazhi, summarize, ParseError
 from rules import assess_all
 from report import format_summary_line, format_top_risks, DISCLAIMER
 from card import build_card, format_card
+import db
 from dadata_client import get_party, DaDataError
 from checko_client import get_company, get_finances, search_by_name, CheckoError
 
@@ -84,7 +85,11 @@ _pending_lock = asyncio.Lock()
 
 
 @router.message(CommandStart())
-async def cmd_start(message: Message):
+async def cmd_start(message: Message, command: CommandObject | None = None):
+    invited_by = None
+    if command and command.args == "friend":
+        invited_by = OWNER_ID
+    await db.upsert_user(message.from_user.id, message.from_user.username, invited_by)
     await message.answer(WELCOME, reply_markup=main_menu)
 
 
@@ -113,18 +118,18 @@ async def cmd_admin(message: Message):
         return
     me = await message.bot.get_me()
     invite_link = f"https://t.me/{me.username}?start=friend"
-    lines = [
-        "<b>🛠 Админ-панель</b>",
-        "",
-        "⚠️ Пока без базы данных (Этап 3) — статистика и список пользователей "
-        "появятся, когда подключим хранилище. Сейчас доступно:",
-        "",
-        f"🔗 Пригласить (бесплатный доступ): {invite_link}",
-        "",
-        "👥 Пользователи — недоступно (нет БД)",
-        "📊 Статистика — недоступно (нет БД)",
-        "✅ Заявки на оплату — недоступно (оплата пока не подключена)",
-    ]
+    stats = await db.get_stats()
+
+    lines = ["<b>🛠 Админ-панель</b>", ""]
+    if stats["enabled"]:
+        lines.append(f"👥 Пользователей: {stats['users']}")
+        lines.append(f"📊 Проверок сегодня: {stats['checks_today']} (всего: {stats['checks_total']})")
+    else:
+        lines.append("⚠️ БД не подключена (DATABASE_URL не задан) — статистика недоступна.")
+    lines.append("")
+    lines.append(f"🔗 Пригласить (бесплатный доступ): {invite_link}")
+    lines.append("")
+    lines.append("✅ Заявки на оплату — недоступно (оплата пока не подключена)")
     await message.answer("\n".join(lines))
 
 
@@ -196,8 +201,10 @@ async def run_analysis(message: Message, state: FSMContext, purchases_path: str,
     summaries = summarize(all_ops)
     assessments = assess_all(summaries, all_ops)
 
-    await message.answer(format_summary_line(assessments))
+    summary_line = format_summary_line(assessments)
+    await message.answer(summary_line)
     await message.answer(format_top_risks(summaries, assessments) + DISCLAIMER, reply_markup=main_menu)
+    await db.log_check(message.from_user.id, "book", None, summary_line)
 
     await state.clear()
 
@@ -246,14 +253,20 @@ async def receive_inn(message: Message, state: FSMContext):
     else:
         inn = query
 
-    await message.answer("⏳ Ищу данные...")
-    try:
-        result = await build_card(inn, DADATA_API_KEY, DADATA_SECRET_KEY, CHECKO_API_KEY)
-        text = format_card(result)
-    except Exception as e:
-        logging.exception("Ошибка при построении карточки по ИНН %s", inn)
-        text = f"❌ Не удалось получить данные по ИНН {inn}: {e}\nПопробуйте ещё раз или другой ИНН."
+    cached = await db.get_cached_card(inn)
+    if cached:
+        text = cached + "\n\n<i>(из кэша, обновлено в течение суток)</i>"
+    else:
+        await message.answer("⏳ Ищу данные...")
+        try:
+            result = await build_card(inn, DADATA_API_KEY, DADATA_SECRET_KEY, CHECKO_API_KEY)
+            text = format_card(result)
+            await db.set_cached_card(inn, text)
+        except Exception as e:
+            logging.exception("Ошибка при построении карточки по ИНН %s", inn)
+            text = f"❌ Не удалось получить данные по ИНН {inn}: {e}\nПопробуйте ещё раз или другой ИНН."
 
+    await db.log_check(message.from_user.id, "counterparty", inn, text.split("\n")[0][:200])
     await message.answer(text, reply_markup=main_menu)
     await message.answer("Введите следующий ИНН или название, или выберите другое действие кнопкой ниже.")
     # состояние остаётся waiting_inn — можно проверять несколько ИНН подряд
@@ -299,8 +312,20 @@ async def debug_raw(message: Message):
         await message.answer(f"Checko finances error: {e}")
 
 
+async def _cleanup_loop():
+    while True:
+        try:
+            await db.cleanup_old_data()
+        except Exception:
+            logging.exception("Ошибка при очистке старых данных")
+        await asyncio.sleep(24 * 60 * 60)
+
+
 async def main():
     logging.basicConfig(level=logging.INFO)
+
+    await db.init_db()
+    asyncio.create_task(_cleanup_loop())
 
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher(storage=MemoryStorage())
