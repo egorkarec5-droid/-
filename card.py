@@ -165,11 +165,26 @@ def format_card(result: CardResult) -> str:
     else:
         lines.append(f"⚠️ DaData недоступна: {result.dadata_error or 'нет данных'}")
 
+    # Текущий руководитель — берём имя из DaData (обычно первым приходит), но
+    # ИНН/должность/дату — из Checko, у DaData поля ИНН в этом блоке нет вообще
+    current_director = None
+    director_history = []
+    if c and c.directors:
+        current_list = [x for x in c.directors if not x.end_date]
+        if current_list:
+            current_director = current_list[-1]
+            director_history = [x for x in c.directors if x is not current_director]
+        else:
+            current_director = c.directors[-1]
+            director_history = c.directors[:-1]
+
     if d and d.management:
         lines.append("")
         lines.append("<b>Руководитель</b>")
         m = d.management
-        lines.append(f"{m.name}" + (f" (ИНН {m.inn})" if m.inn else ""))
+        inn = m.inn or (current_director.inn if current_director and current_director.name == m.name else "")
+        post = current_director.post if current_director and current_director.name == m.name else m.post
+        lines.append(f"{m.name}" + (f" (ИНН {inn})" if inn else "") + (f", {post}" if post else ""))
         if c and c.managing_org and c.managing_org.inn == m.inn:
             tag = " 🔴 недостоверность" if c.managing_org.unreliable else ""
             lines.append(f"(управляющая организация{tag})")
@@ -179,17 +194,30 @@ def format_card(result: CardResult) -> str:
         mo = c.managing_org
         tag = " 🔴 недостоверность" if mo.unreliable else ""
         lines.append(f"{mo.name} (ИНН {mo.inn}) — управляющая организация{tag}")
+    elif current_director:
+        lines.append("")
+        lines.append("<b>Руководитель</b>")
+        marks = ""
+        if current_director.disqualified:
+            marks += " 🔴 дисквалифицирован"
+        if current_director.is_mass:
+            marks += " 🔴 массовый руководитель"
+        if current_director.unreliable:
+            marks += " 🔴 недостоверность"
+        lines.append(
+            f"{current_director.name}"
+            + (f" (ИНН {current_director.inn})" if current_director.inn else "")
+            + (f", {current_director.post}" if current_director.post else "")
+            + marks
+        )
 
-    if c and c.directors:
-        if not (d and d.management) and not (c and c.managing_org):
-            lines.append("")
-            lines.append("<b>Руководитель</b>")
+    if director_history:
         lines.append("")
         lines.append("<b>История руководителей</b>")
-        for dir_ in c.directors:
+        for dir_ in director_history:
             period = ""
             if dir_.record_date:
-                period = f" — с {dir_.record_date}" + (f" по {dir_.end_date}" if dir_.end_date else " (текущий)")
+                period = f" — с {dir_.record_date}" + (f" по {dir_.end_date}" if dir_.end_date else "")
             marks = ""
             if dir_.disqualified:
                 marks += " 🔴 дисквалифицирован"
