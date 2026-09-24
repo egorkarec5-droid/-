@@ -23,6 +23,12 @@ ROUND_SUM_DIVISOR = 10_000
 # этого контрагента, чтобы считаться "резким скачком"
 SPIKE_MULTIPLIER = 3
 
+# Круглые суммы и суммы у порога осмысленны только для операций в диапазоне,
+# актуальном для контроля по 115-ФЗ — не для рутинного крупного корпоративного
+# документооборота (там счета на сотни миллионов круглыми суммами — норма,
+# а не признак обнала). Выше этого потолка обе проверки просто не применяются.
+RELEVANT_SCALE_CEILING = 3_000_000
+
 
 @dataclass
 class RiskFlag:
@@ -48,6 +54,8 @@ def _is_round_sum(amount: float) -> bool:
 
 
 def _near_threshold(amount: float) -> float | None:
+    if amount > RELEVANT_SCALE_CEILING:
+        return None
     for threshold in CONTROL_THRESHOLDS:
         if threshold * (1 - THRESHOLD_TOLERANCE) <= amount < threshold:
             return threshold
@@ -55,13 +63,19 @@ def _near_threshold(amount: float) -> float | None:
 
 
 def _check_round_sums(summary: CounterpartySummary) -> RiskFlag | None:
-    round_ops = [op for op in summary.operations if _is_round_sum(op.amount)]
-    if len(round_ops) >= 2:
+    round_ops = [
+        op for op in summary.operations
+        if _is_round_sum(op.amount) and abs(op.amount) <= RELEVANT_SCALE_CEILING
+    ]
+    # для мелких/средних сумм 2+ совпадений уже заметно; при большом числе
+    # операций у контрагента требуем и заметную долю, не только счётчик
+    relevant_ops = [op for op in summary.operations if abs(op.amount) <= RELEVANT_SCALE_CEILING]
+    if len(round_ops) >= 2 and (len(relevant_ops) < 10 or len(round_ops) / len(relevant_ops) >= 0.3):
         return RiskFlag(
             code="round_sums",
             label="Круглые суммы",
             weight=10,
-            detail=f"{len(round_ops)} операций с суммой, кратной {ROUND_SUM_DIVISOR:,} ₽".replace(",", " "),
+            detail=f"{len(round_ops)} операций с суммой, кратной {ROUND_SUM_DIVISOR:,} ₽ (в диапазоне до {RELEVANT_SCALE_CEILING:,} ₽)".replace(",", " "),
         )
     return None
 
