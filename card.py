@@ -3,7 +3,11 @@ import asyncio
 from dataclasses import dataclass, field
 
 from dadata_client import get_party, DaDataParty, DaDataError
-from checko_client import get_company, get_finances, CheckoCompany, FinanceYear, CheckoError
+from checko_client import (
+    get_company, get_finances, get_enforcements, get_legal_cases, get_inspections,
+    CheckoCompany, FinanceYear, Enforcement, LegalCasesSummary, Inspection, CheckoError,
+)
+from company_analysis import analyze_nominal_director, analyze_shell_company, Verdict
 
 
 @dataclass
@@ -12,6 +16,11 @@ class CardResult:
     dadata: DaDataParty | None
     checko: CheckoCompany | None
     finances: list[FinanceYear] = field(default_factory=list)
+    enforcements: list[Enforcement] = field(default_factory=list)
+    legal_cases: LegalCasesSummary | None = None
+    inspections: list[Inspection] = field(default_factory=list)
+    nominal_director: Verdict | None = None
+    shell_company: Verdict | None = None
     dadata_error: str | None = None
     checko_error: str | None = None
     finances_error: str | None = None
@@ -43,15 +52,46 @@ async def build_card(inn: str, dadata_key: str, dadata_secret: str, checko_key: 
         except CheckoError as e:
             return [], str(e)
 
-    (dadata_res, dadata_err), (checko_res, checko_err), (fin_res, fin_err) = await asyncio.gather(
-        _dadata(), _checko(), _finances()
-    )
+    async def _enforcements():
+        try:
+            return await get_enforcements(inn, checko_key), None
+        except CheckoError as e:
+            return [], str(e)
+
+    async def _legal_cases():
+        try:
+            return await get_legal_cases(inn, checko_key), None
+        except CheckoError as e:
+            return None, str(e)
+
+    async def _inspections():
+        try:
+            return await get_inspections(inn, checko_key), None
+        except CheckoError as e:
+            return [], str(e)
+
+    (
+        (dadata_res, dadata_err),
+        (checko_res, checko_err),
+        (fin_res, fin_err),
+        (enf_res, _enf_err),
+        (legal_res, _legal_err),
+        (insp_res, _insp_err),
+    ) = await asyncio.gather(_dadata(), _checko(), _finances(), _enforcements(), _legal_cases(), _inspections())
+
+    nominal = analyze_nominal_director(checko_res, dadata_res)
+    shell = analyze_shell_company(checko_res, dadata_res, fin_res, enf_res, legal_res, insp_res)
 
     return CardResult(
         inn=inn,
         dadata=dadata_res,
         checko=checko_res,
         finances=fin_res,
+        enforcements=enf_res,
+        legal_cases=legal_res,
+        inspections=insp_res,
+        nominal_director=nominal,
+        shell_company=shell,
         dadata_error=dadata_err,
         checko_error=checko_err,
         finances_error=fin_err,
@@ -208,6 +248,35 @@ def format_card(result: CardResult) -> str:
         if len(c.related_orgs) > 5:
             lines.append(f"…и ещё {len(c.related_orgs) - 5}")
 
+    if result.enforcements:
+        total_debt = sum(e.debt_remaining or e.debt_sum or 0 for e in result.enforcements)
+        lines.append("")
+        lines.append(f"<b>Исполнительные производства (ФССП)</b> — {len(result.enforcements)}")
+        lines.append(f"🔴 Общая непогашенная задолженность: {total_debt:,.0f} ₽".replace(",", " "))
+        for e in result.enforcements[:3]:
+            sum_str = f"{(e.debt_remaining or e.debt_sum or 0):,.0f} ₽".replace(",", " ")
+            lines.append(f"• №{e.number} от {e.date} — {e.subject}, {sum_str}")
+        if len(result.enforcements) > 3:
+            lines.append(f"…и ещё {len(result.enforcements) - 3}")
+
+    if result.legal_cases and result.legal_cases.cases:
+        lc = result.legal_cases
+        as_defendant = sum(1 for c in lc.cases if c.role == "ответчик")
+        as_plaintiff = len(lc.cases) - as_defendant
+        lines.append("")
+        lines.append(f"<b>Арбитражные дела</b> — {len(lc.cases)} (истец: {as_plaintiff}, ответчик: {as_defendant})")
+        lines.append(f"Общая сумма исков: {lc.total_claim_sum:,.0f} ₽".replace(",", " "))
+        for c_ in sorted(lc.cases, key=lambda x: x.date, reverse=True)[:3]:
+            sum_str = f", {c_.claim_sum:,.0f} ₽".replace(",", " ") if c_.claim_sum else ""
+            lines.append(f"• №{c_.number} от {c_.date} — {c_.role}{sum_str}")
+        if len(lc.cases) > 3:
+            lines.append(f"…и ещё {len(lc.cases) - 3}")
+
+    if result.inspections:
+        with_violations = [i for i in result.inspections if i.violations_found]
+        lines.append("")
+        lines.append(f"<b>Проверки</b> — {len(result.inspections)}" + (f", из них с нарушениями: {len(with_violations)}" if with_violations else ""))
+
     if c:
         flag_lines = []
         if c.flags.disqualified_person:
@@ -231,10 +300,31 @@ def format_card(result: CardResult) -> str:
             lines.append("<b>Флаги риска</b>")
             lines.extend(flag_lines)
 
+    if result.nominal_director or result.shell_company:
+        lines.append("")
+        lines.append("<b>📊 Расширенная аналитика</b>")
+
+        nd = result.nominal_director
+        if nd:
+            lines.append(f"\n{nd.emoji} <b>Номинальный директор:</b> {nd.label} ({nd.score}/100)")
+            for f in nd.flags:
+                lines.append(f"   • {f.label}: {f.detail}")
+            if not nd.flags:
+                lines.append("   Явных признаков не найдено по доступным данным")
+
+        sc = result.shell_company
+        if sc:
+            lines.append(f"\n{sc.emoji} <b>Техническая/обнальная организация:</b> {sc.label} ({sc.score}/100)")
+            for f in sc.flags:
+                lines.append(f"   • {f.label}: {f.detail}")
+            if not sc.flags:
+                lines.append("   Явных признаков не найдено по доступным данным")
+
     lines.append("")
     lines.append(
         "⚠️ Оценка сформирована автоматически на основе открытых данных "
-        "и не является юридическим заключением."
+        "и не является юридическим заключением. Расширенная аналитика — эвристика "
+        "по совокупности признаков, а не установленный факт."
     )
 
     return "\n".join(lines)
