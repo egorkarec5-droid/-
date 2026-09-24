@@ -1,9 +1,9 @@
 from __future__ import annotations
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from dadata_client import get_party, DaDataParty, DaDataError
-from checko_client import get_company, CheckoCompany, CheckoError
+from checko_client import get_company, get_finances, CheckoCompany, FinanceYear, CheckoError
 
 
 @dataclass
@@ -11,8 +11,10 @@ class CardResult:
     inn: str
     dadata: DaDataParty | None
     checko: CheckoCompany | None
+    finances: list[FinanceYear] = field(default_factory=list)
     dadata_error: str | None = None
     checko_error: str | None = None
+    finances_error: str | None = None
 
     @property
     def found(self) -> bool:
@@ -20,7 +22,7 @@ class CardResult:
 
 
 async def build_card(inn: str, dadata_key: str, dadata_secret: str, checko_key: str) -> CardResult:
-    """Запрашивает оба источника параллельно, не даёт сбою одного уронить другой."""
+    """Запрашивает все источники параллельно, не даёт сбою одного уронить другие."""
 
     async def _dadata():
         try:
@@ -34,14 +36,25 @@ async def build_card(inn: str, dadata_key: str, dadata_secret: str, checko_key: 
         except CheckoError as e:
             return None, str(e)
 
-    (dadata_res, dadata_err), (checko_res, checko_err) = await asyncio.gather(_dadata(), _checko())
+    async def _finances():
+        try:
+            years, _raw = await get_finances(inn, checko_key)
+            return years, None
+        except CheckoError as e:
+            return [], str(e)
+
+    (dadata_res, dadata_err), (checko_res, checko_err), (fin_res, fin_err) = await asyncio.gather(
+        _dadata(), _checko(), _finances()
+    )
 
     return CardResult(
         inn=inn,
         dadata=dadata_res,
         checko=checko_res,
+        finances=fin_res,
         dadata_error=dadata_err,
         checko_error=checko_err,
+        finances_error=fin_err,
     )
 
 
@@ -155,12 +168,15 @@ def format_card(result: CardResult) -> str:
     if c:
         lines.append("")
         lines.append("<b>Финансы и налоги</b>")
-        if c.finances:
-            for fy in c.finances[-3:]:
+        finances = result.finances or c.finances
+        if finances:
+            for fy in finances[-3:]:
                 rev = f"{fy.revenue:,.0f} ₽".replace(",", " ") if fy.revenue is not None else "—"
                 profit = f"{fy.profit:,.0f} ₽".replace(",", " ") if fy.profit is not None else "—"
                 assets = f", актив {fy.assets:,.0f} ₽".replace(",", " ") if fy.assets is not None else ""
                 lines.append(f"{fy.year}: выручка {rev}, прибыль {profit}{assets}")
+        elif result.finances_error:
+            lines.append(f"⚠️ Финансы недоступны: {result.finances_error}")
         if c.capital is not None:
             lines.append(f"Уставный капитал: {c.capital:,.0f} ₽".replace(",", " "))
         if c.tax_system:
