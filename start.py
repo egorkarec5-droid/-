@@ -22,7 +22,7 @@ from rules import assess_all
 from report import format_summary_line, format_top_risks, DISCLAIMER
 from card import build_card, format_card
 from dadata_client import get_party, DaDataError
-from checko_client import get_company, CheckoError
+from checko_client import get_company, get_finances, CheckoError
 
 router = Router()
 
@@ -230,6 +230,12 @@ async def debug_raw(message: Message):
         await _send_raw(message, "Checko", company.raw if company else {})
     except CheckoError as e:
         await message.answer(f"Checko error: {e}")
+
+    try:
+        _years, fin_raw = await get_finances(inn, CHECKO_API_KEY)
+        await _send_raw(message, "Checko finances", fin_raw)
+    except CheckoError as e:
+        await message.answer(f"Checko finances error: {e}")
 
 
 async def main():
