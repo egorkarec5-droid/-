@@ -20,6 +20,7 @@ class FinanceYear:
     year: int
     revenue: float | None = None
     profit: float | None = None
+    assets: float | None = None
 
 
 @dataclass
@@ -27,6 +28,23 @@ class ManagingOrg:
     inn: str
     name: str
     unreliable: bool = False
+
+
+@dataclass
+class CheckoDirector:
+    name: str
+    inn: str = ""
+    post: str = ""
+    start_date: str = ""
+    end_date: str = ""
+
+
+@dataclass
+class CheckoFounder:
+    name: str
+    inn: str = ""
+    share: str = ""
+    kind: str = ""   # физлицо / рос. организация / иностр. организация / ПИФ / РФ
 
 
 @dataclass
@@ -54,11 +72,20 @@ class CheckoCompany:
     gov_contracts_sum: float | None
     reg_date: str
     region: str
+    tax_office_name: str
+    tax_office_code: str
+    tax_office_reg_date: str
+    reg_authority_name: str
+    okved_extra_count: int
+    vat_paid: float | None
     address: str
     address_unreliable: bool
     mass_address_count: int
     okved_name: str
     managing_org: ManagingOrg | None
+    related_orgs: list[dict] = field(default_factory=list)
+    directors: list[CheckoDirector] = field(default_factory=list)
+    founders: list[CheckoFounder] = field(default_factory=list)
     flags: RiskFlags = field(default_factory=RiskFlags)
     finances: list[FinanceYear] = field(default_factory=list)
     phones: list[str] = field(default_factory=list)
@@ -102,6 +129,7 @@ def _parse_company(data: dict) -> CheckoCompany:
             year=int(year_str),
             revenue=_to_float((values or {}).get("Выручка")),
             profit=_to_float((values or {}).get("ЧистПрибыль")),
+            assets=_to_float((values or {}).get("Актив")),
         ))
 
     contacts = data.get("Контакты") or {}
@@ -110,6 +138,19 @@ def _parse_company(data: dict) -> CheckoCompany:
     smb = data.get("РМСП") or {}
     nalogi = data.get("Налоги") or {}
     upr_org_raw = data.get("УпрОрг")
+    tek_fns = data.get("ТекФНС") or {}
+    reg_fns = data.get("РегФНС") or {}
+    okved_extra = data.get("ОКВЭДДоп") or []
+    sved_upl = nalogi.get("СведУпл") or []
+    vat_paid = None
+    for item in sved_upl:
+        if "добавленную стоимость" in (item.get("Наим") or ""):
+            vat_paid = _to_float(item.get("Сумма"))
+            break
+    related_orgs = [
+        {"inn": r.get("ИНН", ""), "name": r.get("НаимСокр", ""), "status": r.get("Статус", "")}
+        for r in (data.get("СвязУчред") or [])
+    ]
 
     managing_org = None
     if upr_org_raw:
@@ -118,6 +159,42 @@ def _parse_company(data: dict) -> CheckoCompany:
             name=upr_org_raw.get("НаимСокр", "") or upr_org_raw.get("НаимПолн", ""),
             unreliable=bool(upr_org_raw.get("Недост")),
         )
+
+    # ВАЖНО: поля внутри "Руковод" и "Учред" не подтверждены реальным примером —
+    # у тестовой компании оба списка были пустыми. Разметка ниже — обоснованное
+    # предположение по стилю остальных полей Checko, нужно сверить на компании,
+    # где эти списки реально заполнены (обычное ООО, не АО с регистратором).
+    directors = []
+    for item in (data.get("Руковод") or []):
+        directors.append(CheckoDirector(
+            name=item.get("ФИО", ""),
+            inn=item.get("ИНН", ""),
+            post=item.get("Должность", ""),
+            start_date=item.get("ДатаНач", ""),
+            end_date=item.get("ДатаКон", ""),
+        ))
+
+    founders = []
+    uchred = data.get("Учред") or {}
+
+    def _share(item: dict) -> str:
+        d = item.get("Доля")
+        if isinstance(d, dict):
+            pct = d.get("Процент")
+            return f"{pct}%" if pct is not None else ""
+        return str(d) if d else ""
+
+    for item in (uchred.get("ФЛ") or []):
+        founders.append(CheckoFounder(name=item.get("ФИО", ""), inn=item.get("ИНН", ""), share=_share(item), kind="физлицо"))
+    for item in (uchred.get("РосОрг") or []):
+        founders.append(CheckoFounder(
+            name=item.get("НаимСокр", "") or item.get("НаимПолн", ""),
+            inn=item.get("ИНН", ""), share=_share(item), kind="рос. организация",
+        ))
+    for item in (uchred.get("ИнОрг") or []):
+        founders.append(CheckoFounder(name=item.get("НаимПолн", ""), share=_share(item), kind="иностр. организация"))
+    for item in (uchred.get("ПИФ") or []):
+        founders.append(CheckoFounder(name=item.get("Наим", "") or item.get("НаимПолн", ""), share=_share(item), kind="ПИФ"))
 
     flags = RiskFlags(
         disqualified_person=bool(data.get("ДисквЛица")),
@@ -143,11 +220,20 @@ def _parse_company(data: dict) -> CheckoCompany:
         gov_contracts_sum=_to_float((data.get("Контракты") or {}).get("СумГК")),
         reg_date=data.get("ДатаРег", ""),
         region=(data.get("Регион") or {}).get("Наим", ""),
+        tax_office_name=tek_fns.get("НаимОрг", ""),
+        tax_office_code=tek_fns.get("КодОрг", ""),
+        tax_office_reg_date=tek_fns.get("ДатаПостУч", ""),
+        reg_authority_name=reg_fns.get("НаимОрг", ""),
+        okved_extra_count=len(okved_extra),
+        vat_paid=vat_paid,
+        related_orgs=related_orgs,
         address=yur_adres.get("АдресРФ", ""),
         address_unreliable=bool(yur_adres.get("Недост")),
         mass_address_count=len(yur_adres.get("МассАдрес") or []),
         okved_name=okved.get("Наим", ""),
         managing_org=managing_org,
+        directors=directors,
+        founders=founders,
         flags=flags,
         finances=finance_years,
         phones=contacts.get("Тел", []) or [],
