@@ -12,13 +12,17 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import Message
 
-from config import BOT_TOKEN, DADATA_API_KEY, DADATA_SECRET_KEY, CHECKO_API_KEY
+import json
+
+from config import BOT_TOKEN, OWNER_ID, DADATA_API_KEY, DADATA_SECRET_KEY, CHECKO_API_KEY
 from keyboards import main_menu
 from book_detect import detect_book_type
 from parser import parse_pokupki, parse_prodazhi, summarize, ParseError
 from rules import assess_all
 from report import format_summary_line, format_top_risks, DISCLAIMER
 from card import build_card, format_card
+from dadata_client import get_party, DaDataError
+from checko_client import get_company, CheckoError
 
 router = Router()
 
@@ -166,6 +170,34 @@ async def receive_inn(message: Message, state: FSMContext):
     result = await build_card(inn, DADATA_API_KEY, DADATA_SECRET_KEY, CHECKO_API_KEY)
     await message.answer(format_card(result), reply_markup=main_menu)
     await state.clear()
+
+
+@router.message(F.text.startswith("/debug"))
+async def debug_raw(message: Message):
+    if message.from_user.id != OWNER_ID:
+        return
+
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip().isdigit():
+        await message.answer("Использование: /debug <ИНН>")
+        return
+    inn = parts[1].strip()
+
+    try:
+        party = await get_party(inn, DADATA_API_KEY, DADATA_SECRET_KEY)
+        raw = party.raw if party else {}
+        text = json.dumps(raw, ensure_ascii=False, indent=2)
+        await message.answer(f"<b>DaData raw ({len(text)} chars):</b>\n<code>{text[:3500]}</code>")
+    except DaDataError as e:
+        await message.answer(f"DaData error: {e}")
+
+    try:
+        company = await get_company(inn, CHECKO_API_KEY)
+        raw = company.raw if company else {}
+        text = json.dumps(raw, ensure_ascii=False, indent=2)
+        await message.answer(f"<b>Checko raw ({len(text)} chars):</b>\n<code>{text[:3500]}</code>")
+    except CheckoError as e:
+        await message.answer(f"Checko error: {e}")
 
 
 async def main():
