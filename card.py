@@ -120,9 +120,16 @@ def format_card(result: CardResult) -> str:
         lines.append("<b>История руководителей</b>")
         for dir_ in c.directors:
             period = ""
-            if dir_.start_date:
-                period = f" — с {dir_.start_date}" + (f" по {dir_.end_date}" if dir_.end_date else " (текущий)")
-            lines.append(f"{dir_.name}" + (f" (ИНН {dir_.inn})" if dir_.inn else "") + (f", {dir_.post}" if dir_.post else "") + period)
+            if dir_.record_date:
+                period = f" — с {dir_.record_date}" + (f" по {dir_.end_date}" if dir_.end_date else " (текущий)")
+            marks = ""
+            if dir_.disqualified:
+                marks += " 🔴 дисквалифицирован"
+            if dir_.is_mass:
+                marks += " 🔴 массовый руководитель"
+            if dir_.unreliable:
+                marks += " 🔴 недостоверность"
+            lines.append(f"{dir_.name}" + (f" (ИНН {dir_.inn})" if dir_.inn else "") + (f", {dir_.post}" if dir_.post else "") + period + marks)
 
     founders_all = list(d.founders) if d and d.founders else []
     if c and c.founders:
@@ -138,7 +145,12 @@ def format_card(result: CardResult) -> str:
         for f in founders_all:
             share = f" — {f.share}" if getattr(f, "share", "") else ""
             kind = f" ({f.kind})" if getattr(f, "kind", "") else ""
-            lines.append(f"{f.name}" + (f" (ИНН {f.inn})" if f.inn else "") + share + kind)
+            marks = ""
+            if getattr(f, "is_mass", False):
+                marks += " 🔴 массовый учредитель"
+            if getattr(f, "unreliable", False):
+                marks += " 🔴 недостоверность"
+            lines.append(f"{f.name}" + (f" (ИНН {f.inn})" if f.inn else "") + share + kind + marks)
 
     if c:
         lines.append("")
