@@ -321,7 +321,8 @@ def format_card(result: CardResult) -> str:
         lines.append(f"Общая сумма исков: {lc.total_claim_sum:,.0f} ₽".replace(",", " "))
         for c_ in sorted(lc.cases, key=lambda x: x.date, reverse=True)[:3]:
             sum_str = f", {c_.claim_sum:,.0f} ₽".replace(",", " ") if c_.claim_sum else ""
-            lines.append(f"• №{c_.number} от {c_.date} — {c_.role}{sum_str}")
+            link = f"https://kad.arbitr.ru/Card/{c_.uuid}" if c_.uuid else c_.kad_url
+            lines.append(f"• №{c_.number} от {c_.date} — {c_.role}{sum_str}" + (f"\n  {link}" if link else ""))
         if len(lc.cases) > 3:
             lines.append(f"…и ещё {len(lc.cases) - 3}")
 
@@ -329,6 +330,7 @@ def format_card(result: CardResult) -> str:
         with_violations = [i for i in result.inspections if i.violations_found]
         lines.append("")
         lines.append(f"<b>Проверки</b> — {len(result.inspections)}" + (f", из них с нарушениями: {len(with_violations)}" if with_violations else ""))
+        lines.append(f"Подробности по ИНН: https://proverki.gov.ru/portal (поиск по ИНН {result.inn})")
 
     if c:
         flag_lines = []
