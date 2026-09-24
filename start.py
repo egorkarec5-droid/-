@@ -192,10 +192,11 @@ async def receive_inn(message: Message, state: FSMContext):
     except Exception as e:
         logging.exception("Ошибка при построении карточки по ИНН %s", inn)
         text = f"❌ Не удалось получить данные по ИНН {inn}: {e}\nПопробуйте ещё раз или другой ИНН."
-    finally:
-        await state.clear()
 
     await message.answer(text, reply_markup=main_menu)
+    await message.answer("Введите следующий ИНН, или выберите другое действие кнопкой ниже.")
+    # состояние остаётся waiting_inn — можно проверять несколько ИНН подряд
+    # без повторного нажатия кнопки; любая другая кнопка меню сбросит его сама
 
 
 async def _send_raw(message: Message, label: str, raw: dict):
