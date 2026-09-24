@@ -26,6 +26,23 @@ from checko_client import get_company, CheckoError
 
 router = Router()
 
+
+@router.error(F.update.message.as_("message"))
+async def global_error_handler(event, message: Message, state: FSMContext):
+    """Ловит вообще любую необработанную ошибку в любом хендлере: логирует,
+    сбрасывает зависшее состояние и отвечает пользователю, вместо того
+    чтобы бот молчал или требовал /start для восстановления."""
+    logging.exception("Необработанная ошибка при обработке сообщения", exc_info=event.exception)
+    try:
+        await state.clear()
+    except Exception:
+        logging.exception("Не удалось сбросить состояние после ошибки")
+    await message.answer(
+        "⚠️ Что-то пошло не так при обработке запроса. Я сбросил состояние — можно продолжать.",
+        reply_markup=main_menu,
+    )
+    return True
+
 WELCOME = (
     "👋 <b>Привет! Я — Досье Плюс.</b>\n\n"
     "Проверяю компании и ИП на признаки риска: подставные фирмы, подозрительные платежи, "
