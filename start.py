@@ -1,41 +1,26 @@
-from aiogram import Router, F
-from aiogram.filters import CommandStart
-from aiogram.types import Message
+import asyncio
+import logging
 
-from keyboards import main_menu
+from aiogram import Bot, Dispatcher
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+from aiogram.fsm.storage.memory import MemoryStorage
 
-router = Router()
-
-WELCOME = (
-    "👋 <b>Привет! Я — Досье Плюс.</b>\n\n"
-    "Проверяю компании и ИП на признаки риска: подставные фирмы, подозрительные платежи, "
-    "скрытые связи между организациями. Умею разбирать целую книгу покупок/продаж "
-    "или проверять одну организацию по ИНН.\n\n"
-    "<b>Что я умею:</b>\n"
-    "📊 Разобрать книгу покупок/продаж — найду подозрительные операции\n"
-    "🔍 Дать карточку по ИНН — статус, финансы, риск-балл\n\n"
-    "Все действия — кнопками ниже, ничего не нужно печатать вручную.\n\n"
-    "⚠️ Оценка риска — автоматическая, по открытым данным, не является юридическим заключением."
-)
-
-HELP_TEXT = (
-    "<b>Как пользоваться ботом</b>\n\n"
-    "📊 <b>Проверить книгу</b>\n"
-    "Пришлите два файла: книгу покупок (Раздел 8) и книгу продаж (Раздел 9) "
-    "из декларации по НДС. Я разберу все операции, найду подозрительные и покажу сводку.\n\n"
-    "🔍 <b>Проверить контрагента</b>\n"
-    "Введите ИНН или название организации — пришлю карточку (появится на Этапе 2).\n\n"
-    "📋 <b>Список ИНН</b>\n"
-    "Пришлите список ИНН текстом или файлом — проверю каждый.\n\n"
-    "⚠️ Оценка риска — автоматическая, по открытым данным, не является юридическим заключением."
-)
+from config import BOT_TOKEN
+from handlers import start, book
 
 
-@router.message(CommandStart())
-async def cmd_start(message: Message):
-    await message.answer(WELCOME, reply_markup=main_menu)
+async def main():
+    logging.basicConfig(level=logging.INFO)
+
+    bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    dp = Dispatcher(storage=MemoryStorage())
+
+    dp.include_router(start.router)
+    dp.include_router(book.router)
+
+    await dp.start_polling(bot)
 
 
-@router.message(F.text == "ℹ️ Помощь")
-async def cmd_help(message: Message):
-    await message.answer(HELP_TEXT)
+if __name__ == "__main__":
+    asyncio.run(main())
