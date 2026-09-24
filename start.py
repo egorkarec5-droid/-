@@ -178,7 +178,7 @@ async def start_counterparty_check(message: Message, state: FSMContext):
     await message.answer("Введите ИНН организации или ИП (10 или 12 цифр).")
 
 
-@router.message(CardStates.waiting_inn, F.text)
+@router.message(CardStates.waiting_inn, F.text, ~F.text.startswith("/"))
 async def receive_inn(message: Message, state: FSMContext):
     inn = message.text.strip()
     if not _is_valid_inn(inn):
