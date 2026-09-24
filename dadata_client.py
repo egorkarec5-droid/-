@@ -7,6 +7,7 @@
 from __future__ import annotations
 import aiohttp
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 DADATA_URL = "https://suggestions.dadata.ru/suggestions/api/4_1/rs/findById/party"
 
@@ -71,6 +72,15 @@ async def get_party(inn: str, api_key: str, secret_key: str) -> DaDataParty | No
     return _parse_party(data)
 
 
+def _ms_to_date(ms) -> str:
+    if not ms:
+        return ""
+    try:
+        return datetime.fromtimestamp(int(ms) / 1000, tz=timezone.utc).strftime("%d.%m.%Y")
+    except (ValueError, OSError):
+        return str(ms)
+
+
 def _parse_party(data: dict) -> DaDataParty:
     state = data.get("state") or {}
     address = data.get("address") or {}
@@ -101,7 +111,7 @@ def _parse_party(data: dict) -> DaDataParty:
         name_short=(data.get("name") or {}).get("short_with_opf", "") or (data.get("name") or {}).get("full_with_opf", ""),
         opf_short=opf.get("short", ""),
         status=state.get("status", ""),
-        registration_date=str(state.get("registration_date", "")),
+        registration_date=_ms_to_date(state.get("registration_date")),
         address=address.get("value", ""),
         # qc == "2" означает "адрес не найден/массовый" в квалификаторе DaData;
         # это эвристика, при первом реальном ответе стоит свериться с document_context
