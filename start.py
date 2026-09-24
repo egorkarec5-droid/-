@@ -172,6 +172,15 @@ async def receive_inn(message: Message, state: FSMContext):
     await state.clear()
 
 
+async def _send_raw(message: Message, label: str, raw: dict):
+    text = json.dumps(raw, ensure_ascii=False, indent=2)
+    chunk_size = 3800
+    chunks = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)] or [""]
+    await message.answer(f"<b>{label} raw ({len(text)} chars, {len(chunks)} частей):</b>")
+    for i, chunk in enumerate(chunks, 1):
+        await message.answer(f"<code>{chunk}</code>")
+
+
 @router.message(F.text.startswith("/debug"))
 async def debug_raw(message: Message):
     if message.from_user.id != OWNER_ID:
@@ -185,17 +194,13 @@ async def debug_raw(message: Message):
 
     try:
         party = await get_party(inn, DADATA_API_KEY, DADATA_SECRET_KEY)
-        raw = party.raw if party else {}
-        text = json.dumps(raw, ensure_ascii=False, indent=2)
-        await message.answer(f"<b>DaData raw ({len(text)} chars):</b>\n<code>{text[:3500]}</code>")
+        await _send_raw(message, "DaData", party.raw if party else {})
     except DaDataError as e:
         await message.answer(f"DaData error: {e}")
 
     try:
         company = await get_company(inn, CHECKO_API_KEY)
-        raw = company.raw if company else {}
-        text = json.dumps(raw, ensure_ascii=False, indent=2)
-        await message.answer(f"<b>Checko raw ({len(text)} chars):</b>\n<code>{text[:3500]}</code>")
+        await _send_raw(message, "Checko", company.raw if company else {})
     except CheckoError as e:
         await message.answer(f"Checko error: {e}")
 
