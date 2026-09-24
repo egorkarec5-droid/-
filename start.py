@@ -78,6 +78,7 @@ async def cmd_help(message: Message):
 
 @router.message(F.text == "📊 Проверить книгу")
 async def start_book_check(message: Message, state: FSMContext):
+    await state.clear()
     await state.set_state(BookStates.waiting_files)
     _pending_books[message.from_user.id] = {}
     await message.answer(
@@ -155,6 +156,7 @@ def _is_valid_inn(text: str) -> bool:
 
 @router.message(F.text == "🔍 Проверить контрагента")
 async def start_counterparty_check(message: Message, state: FSMContext):
+    await state.clear()
     await state.set_state(CardStates.waiting_inn)
     await message.answer("Введите ИНН организации или ИП (10 или 12 цифр).")
 
@@ -167,9 +169,16 @@ async def receive_inn(message: Message, state: FSMContext):
         return
 
     await message.answer("⏳ Ищу данные...")
-    result = await build_card(inn, DADATA_API_KEY, DADATA_SECRET_KEY, CHECKO_API_KEY)
-    await message.answer(format_card(result), reply_markup=main_menu)
-    await state.clear()
+    try:
+        result = await build_card(inn, DADATA_API_KEY, DADATA_SECRET_KEY, CHECKO_API_KEY)
+        text = format_card(result)
+    except Exception as e:
+        logging.exception("Ошибка при построении карточки по ИНН %s", inn)
+        text = f"❌ Не удалось получить данные по ИНН {inn}: {e}\nПопробуйте ещё раз или другой ИНН."
+    finally:
+        await state.clear()
+
+    await message.answer(text, reply_markup=main_menu)
 
 
 async def _send_raw(message: Message, label: str, raw: dict):
