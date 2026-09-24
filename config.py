@@ -7,6 +7,7 @@ BOT_NAME = "Досье Плюс"
 DADATA_API_KEY = os.getenv("DADATA_API_KEY", "")
 DADATA_SECRET_KEY = os.getenv("DADATA_SECRET_KEY", "")
 CHECKO_API_KEY = os.getenv("CHECKO_API_KEY", "")
+DATABASE_URL = os.getenv("DATABASE_URL", "")
 
 if not BOT_TOKEN:
     raise RuntimeError("Переменная окружения BOT_TOKEN не задана")
