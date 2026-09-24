@@ -107,6 +107,19 @@ STATUS_LABELS = {
 }
 
 
+def _fmt_short(value: float | None) -> str:
+    """Компактный формат суммы для таблицы: 158.1млн / 44т. / — """
+    if value is None:
+        return "—"
+    sign = "-" if value < 0 else ""
+    v = abs(value)
+    if v >= 1_000_000:
+        return f"{sign}{v / 1_000_000:.1f}млн"
+    if v >= 1_000:
+        return f"{sign}{v / 1_000:.0f}т."
+    return f"{sign}{v:.0f}"
+
+
 def format_card(result: CardResult) -> str:
     d = result.dadata
     c = result.checko
@@ -210,13 +223,23 @@ def format_card(result: CardResult) -> str:
         lines.append("<b>Финансы и налоги</b>")
         finances = result.finances or c.finances
         if finances:
-            for fy in finances[-3:]:
-                rev = f"{fy.revenue:,.0f} ₽".replace(",", " ") if fy.revenue is not None else "—"
-                profit = f"{fy.profit:,.0f} ₽".replace(",", " ") if fy.profit is not None else "—"
-                assets = f", актив {fy.assets:,.0f} ₽".replace(",", " ") if fy.assets is not None else ""
-                lines.append(f"{fy.year}: выручка {rev}, прибыль {profit}{assets}")
+            rows = finances[-4:]
+            col_year = 6
+            col_val = 11
+
+            def cell(v):
+                return _fmt_short(v).rjust(col_val)
+
+            header = "Год".ljust(col_year) + "Выручка".rjust(col_val) + "Прибыль".rjust(col_val) + "Актив".rjust(col_val)
+            table_lines = [header]
+            for fy in rows:
+                row = str(fy.year).ljust(col_year) + cell(fy.revenue) + cell(fy.profit) + cell(fy.assets)
+                table_lines.append(row)
+            lines.append("<pre>" + "\n".join(table_lines) + "</pre>")
         elif result.finances_error:
             lines.append(f"⚠️ Финансы недоступны: {result.finances_error}")
+
+        lines.append("――――――――――――――――")
         if c.capital is not None:
             lines.append(f"Уставный капитал: {c.capital:,.0f} ₽".replace(",", " "))
         if c.tax_system:
