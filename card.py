@@ -83,12 +83,17 @@ def format_card(result: CardResult) -> str:
         if c and c.mass_address_count:
             lines.append(f"На этом адресе ещё организаций: {c.mass_address_count}")
         okved_name = d.okved_name or (c.okved_name if c else "")
+        okved_extra = f" (+{c.okved_extra_count} видов деятельности)" if c and c.okved_extra_count else ""
         if d.okved or okved_name:
-            lines.append(f"ОКВЭД: {d.okved} {okved_name}".strip())
+            lines.append(f"ОКВЭД: {d.okved} {okved_name}{okved_extra}".strip())
         if d.registration_date:
             lines.append(f"Регистрация: {d.registration_date}")
         if c and c.region:
             lines.append(f"Регион: {c.region}")
+        if c and c.tax_office_name:
+            lines.append(f"Налоговый орган: {c.tax_office_name} (с {c.tax_office_reg_date})")
+        if c and c.reg_authority_name:
+            lines.append(f"Регистрирующий орган: {c.reg_authority_name}")
     else:
         lines.append(f"⚠️ DaData недоступна: {result.dadata_error or 'нет данных'}")
 
@@ -107,12 +112,33 @@ def format_card(result: CardResult) -> str:
         tag = " 🔴 недостоверность" if mo.unreliable else ""
         lines.append(f"{mo.name} (ИНН {mo.inn}) — управляющая организация{tag}")
 
-    if d and d.founders:
+    if c and c.directors:
+        if not (d and d.management) and not (c and c.managing_org):
+            lines.append("")
+            lines.append("<b>Руководитель</b>")
+        lines.append("")
+        lines.append("<b>История руководителей</b>")
+        for dir_ in c.directors:
+            period = ""
+            if dir_.start_date:
+                period = f" — с {dir_.start_date}" + (f" по {dir_.end_date}" if dir_.end_date else " (текущий)")
+            lines.append(f"{dir_.name}" + (f" (ИНН {dir_.inn})" if dir_.inn else "") + (f", {dir_.post}" if dir_.post else "") + period)
+
+    founders_all = list(d.founders) if d and d.founders else []
+    if c and c.founders:
+        known_inns = {f.inn for f in founders_all if f.inn}
+        for cf in c.founders:
+            if cf.inn and cf.inn in known_inns:
+                continue
+            founders_all.append(cf)
+
+    if founders_all:
         lines.append("")
         lines.append("<b>Учредители</b>")
-        for f in d.founders:
-            share = f" — {f.share}" if f.share else ""
-            lines.append(f"{f.name}" + (f" (ИНН {f.inn})" if f.inn else "") + share)
+        for f in founders_all:
+            share = f" — {f.share}" if getattr(f, "share", "") else ""
+            kind = f" ({f.kind})" if getattr(f, "kind", "") else ""
+            lines.append(f"{f.name}" + (f" (ИНН {f.inn})" if f.inn else "") + share + kind)
 
     if c:
         lines.append("")
@@ -121,13 +147,16 @@ def format_card(result: CardResult) -> str:
             for fy in c.finances[-3:]:
                 rev = f"{fy.revenue:,.0f} ₽".replace(",", " ") if fy.revenue is not None else "—"
                 profit = f"{fy.profit:,.0f} ₽".replace(",", " ") if fy.profit is not None else "—"
-                lines.append(f"{fy.year}: выручка {rev}, прибыль {profit}")
+                assets = f", актив {fy.assets:,.0f} ₽".replace(",", " ") if fy.assets is not None else ""
+                lines.append(f"{fy.year}: выручка {rev}, прибыль {profit}{assets}")
         if c.capital is not None:
             lines.append(f"Уставный капитал: {c.capital:,.0f} ₽".replace(",", " "))
         if c.tax_system:
             lines.append(f"Налоговый режим: {c.tax_system}")
+        if c.vat_paid is not None:
+            lines.append(f"НДС уплачено: {c.vat_paid:,.0f} ₽".replace(",", " "))
         if c.taxes_paid is not None:
-            lines.append(f"Уплачено налогов: {c.taxes_paid:,.0f} ₽".replace(",", " "))
+            lines.append(f"Всего уплачено налогов: {c.taxes_paid:,.0f} ₽".replace(",", " "))
         if c.employee_count is not None:
             lines.append(f"Сотрудники: {c.employee_count}")
         if c.is_smb:
@@ -141,6 +170,15 @@ def format_card(result: CardResult) -> str:
     elif result.checko_error:
         lines.append("")
         lines.append(f"⚠️ Checko недоступна: {result.checko_error}")
+
+    if c and c.related_orgs:
+        lines.append("")
+        lines.append(f"<b>Связанные организации</b> ({len(c.related_orgs)})")
+        for r in c.related_orgs[:5]:
+            status_mark = "🔴" if r.get("status") and "не действ" in r.get("status", "").lower() else "🟢"
+            lines.append(f"{status_mark} {r.get('name', '')}" + (f" (ИНН {r['inn']})" if r.get("inn") else ""))
+        if len(c.related_orgs) > 5:
+            lines.append(f"…и ещё {len(c.related_orgs) - 5}")
 
     if c:
         flag_lines = []
