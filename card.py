@@ -138,28 +138,30 @@ def format_card(result: CardResult) -> str:
     lines.append("")
     lines.append("<b>Основное</b>")
     if d:
-        lines.append(f"Статус: {STATUS_LABELS.get(d.status, d.status or '—')}")
+        lines.append(f"<b>Статус:</b> {STATUS_LABELS.get(d.status, d.status or '—')}")
         addr_flags = []
         if d.address_is_mass:
             addr_flags.append("⚠️ признаки массового адреса")
         if c and c.address_unreliable:
             addr_flags.append("🔴 недостоверность в ЕГРЮЛ")
         addr_suffix = (" " + " ".join(addr_flags)) if addr_flags else ""
-        lines.append(f"Адрес: {d.address or (c.address if c else '—')}{addr_suffix}")
+        lines.append(f"<b>Адрес:</b> {d.address or (c.address if c else '—')}{addr_suffix}")
         if c and c.mass_address_count:
-            lines.append(f"На этом адресе ещё организаций: {c.mass_address_count}")
+            lines.append(f"<b>На этом адресе ещё организаций:</b> {c.mass_address_count}")
         okved_name = d.okved_name or (c.okved_name if c else "")
-        okved_extra = f" (+{c.okved_extra_count} видов деятельности)" if c and c.okved_extra_count else ""
-        if d.okved or okved_name:
-            lines.append(f"ОКВЭД: {d.okved} {okved_name}{okved_extra}".strip())
+        okved_extra = f" (+{c.okved_extra_count})" if c and c.okved_extra_count else ""
+        if okved_name:
+            lines.append(f"<b>Вид деятельности:</b> {okved_name}{okved_extra}")
+        if d.okved:
+            lines.append(f"<b>ОКВЭД:</b> {d.okved}")
         if d.registration_date:
-            lines.append(f"Регистрация: {d.registration_date}")
+            lines.append(f"<b>Регистрация:</b> {d.registration_date}")
         if c and c.region:
-            lines.append(f"Регион: {c.region}")
+            lines.append(f"<b>Регион:</b> {c.region}")
         if c and c.tax_office_name:
-            lines.append(f"Налоговый орган: {c.tax_office_name} (с {c.tax_office_reg_date})")
+            lines.append(f"<b>Налоговый орган:</b> {c.tax_office_name} (с {c.tax_office_reg_date})")
         if c and c.reg_authority_name:
-            lines.append(f"Регистрирующий орган: {c.reg_authority_name}")
+            lines.append(f"<b>Регистрирующий орган:</b> {c.reg_authority_name}")
     else:
         lines.append(f"⚠️ DaData недоступна: {result.dadata_error or 'нет данных'}")
 
