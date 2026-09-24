@@ -119,11 +119,14 @@ async def get_finances(inn: str, api_key: str) -> tuple[list[FinanceYear], dict]
     for year_str, values in sorted(data.items()):
         if not str(year_str).isdigit() or not isinstance(values, dict):
             continue
+        # подтверждено реальным ответом: это коды строк бухгалтерской отчётности
+        # (форма 1/2 РСБУ), не кириллические названия
+        # 1600 = актив (итого баланса), 2110 = выручка, 2400 = чистая прибыль
         years.append(FinanceYear(
             year=int(year_str),
-            revenue=_to_float(values.get("Выручка")),
-            profit=_to_float(values.get("ЧистПрибыль")),
-            assets=_to_float(values.get("Актив")),
+            revenue=_to_float(values.get("2110")),
+            profit=_to_float(values.get("2400")),
+            assets=_to_float(values.get("1600")),
         ))
     return years, data
 
