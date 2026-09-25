@@ -10,7 +10,7 @@ from aiogram.filters import CommandStart, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import Message
+from aiogram.types import Message, BufferedInputFile
 
 import json
 
@@ -21,6 +21,7 @@ from parser import parse_pokupki, parse_prodazhi, summarize, ParseError
 from rules import assess_all
 from report import format_summary_line, format_top_risks, DISCLAIMER
 from card import build_card, format_card
+from schemes import render_money_flow, FlowRow, render_relations, RelationRow
 import db
 from dadata_client import get_party, DaDataError
 from checko_client import get_company, get_finances, search_by_name, CheckoError
@@ -206,6 +207,19 @@ async def run_analysis(message: Message, state: FSMContext, purchases_path: str,
     await message.answer(format_top_risks(summaries, assessments) + DISCLAIMER, reply_markup=main_menu)
     await db.log_check(message.from_user.id, "book", None, summary_line)
 
+    ranked = sorted(assessments.items(), key=lambda kv: kv[1].score, reverse=True)
+    top_for_scheme = [(inn, a) for inn, a in ranked if a.level in ("high", "medium")][:6]
+    if len(top_for_scheme) >= 2:
+        try:
+            flow_rows = [
+                FlowRow(name=summaries[inn].name, inn=inn, amount=summaries[inn].total_turnover, level=a.level)
+                for inn, a in top_for_scheme
+            ]
+            png = render_money_flow("Наша организация", flow_rows)
+            await message.answer_photo(BufferedInputFile(png, filename="money_flow.png"), caption="📈 Схема платежей — топ рискованных контрагентов")
+        except Exception:
+            logging.exception("Ошибка при рендере схемы платежей")
+
     await state.clear()
 
 
@@ -254,6 +268,7 @@ async def receive_inn(message: Message, state: FSMContext):
         inn = query
 
     cached = await db.get_cached_card(inn)
+    result = None
     if cached:
         text = cached + "\n\n<i>(из кэша, обновлено в течение суток)</i>"
     else:
@@ -268,6 +283,23 @@ async def receive_inn(message: Message, state: FSMContext):
 
     await db.log_check(message.from_user.id, "counterparty", inn, text.split("\n")[0][:200])
     await message.answer(text, reply_markup=main_menu)
+
+    if result and result.checko and result.checko.related_orgs:
+        try:
+            rel_rows = [
+                RelationRow(
+                    name=r.get("name") or "—",
+                    inn=r.get("inn") or "—",
+                    active="не действ" not in (r.get("status") or "").lower(),
+                )
+                for r in result.checko.related_orgs[:6]
+            ]
+            center_name = (result.dadata.name_short if result.dadata else None) or result.checko.name_short or inn
+            png = render_relations(center_name, rel_rows)
+            await message.answer_photo(BufferedInputFile(png, filename="relations.png"), caption="🔗 Схема связей")
+        except Exception:
+            logging.exception("Ошибка при рендере схемы связей")
+
     await message.answer("Введите следующий ИНН или название, или выберите другое действие кнопкой ниже.")
     # состояние остаётся waiting_inn — можно проверять несколько ИНН подряд
     # без повторного нажатия кнопки; любая другая кнопка меню сбросит его сама
