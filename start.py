@@ -420,8 +420,49 @@ async def run_analysis(message: Message, state: FSMContext, purchases_path: str,
         except Exception:
             logging.exception("Ошибка при рендере схемы платежей")
 
+    # обогащаем реальными внешними данными (DaData/Checko) не всех подряд,
+    # а только топ-5 самых рискованных по книге — иначе на большой книге
+    # это будет слишком много запросов за одну проверку
+    top_for_external = [inn for inn, a in ranked if a.level in ("high", "medium")][:5]
+    external_lines = []
+    if top_for_external:
+        await message.answer(f"⏳ Дополнительно проверяю {len(top_for_external)} самых рискованных контрагентов по внешним данным...")
+        external_lines.append("<b>🔎 Внешняя проверка топ-контрагентов (DaData/Checko)</b>")
+        for inn in top_for_external:
+            try:
+                result = await build_card(inn, DADATA_API_KEY, DADATA_SECRET_KEY, CHECKO_API_KEY)
+            except Exception:
+                logging.exception("Ошибка внешней проверки ИНН %s из книги", inn)
+                external_lines.append(f"\n❌ {summaries[inn].name} (ИНН {inn}) — ошибка проверки")
+                continue
+            if not result.found:
+                external_lines.append(f"\n❓ {summaries[inn].name} (ИНН {inn}) — не найдено во внешних источниках")
+                continue
+
+            marks = []
+            if result.reliability and result.reliability.nominal_level and result.reliability.nominal_level > 1:
+                marks.append(f"номинальность: {result.reliability.nominal_label}")
+            if result.reliability and result.reliability.fin_risk_level and result.reliability.fin_risk_level >= 4:
+                marks.append(f"фин. риски: {result.reliability.fin_risk_label}")
+            if result.enforcements:
+                marks.append(f"ФССП: {len(result.enforcements)}")
+            if result.legal_cases and any(c.role == "ответчик" for c in result.legal_cases.cases):
+                marks.append("ответчик в арбитраже")
+            if result.checko and result.checko.flags.sanctions:
+                marks.append("🔴 санкции")
+
+            status_str = ", ".join(marks) if marks else "явных внешних рисков не найдено"
+            external_lines.append(f"\n• <b>{summaries[inn].name}</b> (ИНН {inn}) — {status_str}")
+            await db.log_check(message.from_user.id, "counterparty", inn, f"{summaries[inn].name} — из книги")
+
+        await message.answer("\n".join(external_lines), reply_markup=menu_for(message.from_user.id))
+
     try:
-        report_text = f"<b>Отчёт по книге покупок/продаж</b>\n{summary_line}\n\n" + format_top_risks(summaries, assessments) + DISCLAIMER
+        report_text = (
+            f"<b>Отчёт по книге покупок/продаж</b>\n{summary_line}\n\n"
+            + format_top_risks(summaries, assessments) + DISCLAIMER
+            + ("\n\n" + "\n".join(external_lines) if external_lines else "")
+        )
         pdf_bytes = build_dossier_pdf("Отчёт по книге", "сформировано ботом Досье Плюс", report_text)
         await message.answer_document(
             BufferedInputFile(pdf_bytes, filename="Отчёт_по_книге.pdf"),
