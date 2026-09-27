@@ -8,6 +8,7 @@ from checko_client import (
     CheckoCompany, FinanceYear, Enforcement, LegalCasesSummary, Inspection, Reliability, CheckoError,
 )
 from company_analysis import analyze_nominal_director, analyze_shell_company, Verdict
+from npd_check import check_npd_status
 
 
 @dataclass
@@ -20,6 +21,7 @@ class CardResult:
     legal_cases: LegalCasesSummary | None = None
     inspections: list[Inspection] = field(default_factory=list)
     reliability: Reliability | None = None
+    npd_status: bool | None = None
     nominal_director: Verdict | None = None
     shell_company: Verdict | None = None
     dadata_error: str | None = None
@@ -77,6 +79,9 @@ async def build_card(inn: str, dadata_key: str, dadata_secret: str, checko_key: 
         except CheckoError as e:
             return None, str(e)
 
+    async def _npd():
+        return await check_npd_status(inn)
+
     (
         (dadata_res, dadata_err),
         (checko_res, checko_err),
@@ -85,7 +90,10 @@ async def build_card(inn: str, dadata_key: str, dadata_secret: str, checko_key: 
         (legal_res, _legal_err),
         (insp_res, _insp_err),
         (rel_res, _rel_err),
-    ) = await asyncio.gather(_dadata(), _checko(), _finances(), _enforcements(), _legal_cases(), _inspections(), _reliability())
+        npd_res,
+    ) = await asyncio.gather(
+        _dadata(), _checko(), _finances(), _enforcements(), _legal_cases(), _inspections(), _reliability(), _npd(),
+    )
 
     nominal = analyze_nominal_director(checko_res, dadata_res)
     shell = analyze_shell_company(checko_res, dadata_res, fin_res, enf_res, legal_res, insp_res)
@@ -99,6 +107,7 @@ async def build_card(inn: str, dadata_key: str, dadata_secret: str, checko_key: 
         legal_cases=legal_res,
         inspections=insp_res,
         reliability=rel_res,
+        npd_status=npd_res,
         nominal_director=nominal,
         shell_company=shell,
         dadata_error=dadata_err,
@@ -134,6 +143,13 @@ def format_card(result: CardResult) -> str:
     c = result.checko
 
     if not result.found:
+        if result.npd_status is not None:
+            status_line = "✅ да" if result.npd_status else "нет"
+            return (
+                f"Организация/ИП по ИНН {result.inn} не найдены в ЕГРЮЛ/ЕГРИП — "
+                f"похоже, это просто физлицо.\n\n"
+                f"<b>Самозанятый (НПД):</b> {status_line}"
+            )
         return (
             f"Не нашёл организацию по ИНН {result.inn}. "
             f"Проверьте номер или попробуйте позже."
@@ -171,6 +187,8 @@ def format_card(result: CardResult) -> str:
             lines.append(f"<b>Налоговый орган:</b> {c.tax_office_name} (с {c.tax_office_reg_date})")
         if c and c.reg_authority_name:
             lines.append(f"<b>Регистрирующий орган:</b> {c.reg_authority_name}")
+        if result.npd_status is not None:
+            lines.append(f"<b>Самозанятый (НПД):</b> {'✅ да' if result.npd_status else 'нет'}")
     else:
         lines.append(f"⚠️ DaData недоступна: {result.dadata_error or 'нет данных'}")
 
