@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, text
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 
 from config import DATABASE_URL
@@ -38,6 +38,10 @@ async def init_db():
     _session_maker = async_sessionmaker(_engine, expire_on_commit=False)
     async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # create_all не добавляет колонки в уже существующие таблицы — если users
+        # была создана более ранней версией схемы (до status/paid_until), добавляем вручную
+        await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS status VARCHAR DEFAULT 'free'"))
+        await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS paid_until TIMESTAMPTZ"))
     logging.info("БД инициализирована.")
 
 
