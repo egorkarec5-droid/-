@@ -14,6 +14,7 @@ CHECKO_ENFORCEMENTS_URL = "https://api.checko.ru/v2/enforcements"
 CHECKO_SEARCH_URL = "https://api.checko.ru/v2/search"
 CHECKO_LEGAL_CASES_URL = "https://api.checko.ru/v2/legal-cases"
 CHECKO_INSPECTIONS_URL = "https://api.checko.ru/v2/inspections"
+CHECKO_RELIABILITY_URL = "https://api.checko.ru/v2/reliability"
 
 
 class CheckoError(Exception):
@@ -292,6 +293,67 @@ async def get_inspections(inn: str, api_key: str) -> list[Inspection]:
         )
         for r in records
     ]
+
+
+@dataclass
+class ReliabilityFactor:
+    code: str
+    kind: str   # "Полож" | "ТрВним" | "Негатив"
+    weight: float
+    text: str
+
+
+@dataclass
+class Reliability:
+    scale: int | None                 # Масштаб бизнеса 1-100
+    nominal_level: int | None         # Номинальность.Уровень: 1 не выявлен / 2 средний / 3 высокий
+    nominal_label: str
+    fin_risk_level: int | None        # ФинРиски.Уровень 1-5
+    fin_risk_label: str
+    positive_pct: int | None
+    attention_pct: int | None
+    negative_pct: int | None
+    factors: list[ReliabilityFactor]
+    raw: dict | None = None
+
+
+async def get_reliability(inn: str, api_key: str) -> Reliability | None:
+    """Официальная оценка надёжности Checko (по подходам ФНС) — /v2/reliability.
+    Считается только для действующих организаций/ИП."""
+    async with aiohttp.ClientSession() as session:
+        async with session.get(CHECKO_RELIABILITY_URL, params={"key": api_key, "inn": inn}) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                raise CheckoError(f"Checko (reliability) вернул {resp.status}: {text[:300]}")
+            payload = await resp.json()
+
+    if payload.get("meta", {}).get("status") not in (None, "ok"):
+        raise CheckoError(f"Checko (reliability): {payload.get('meta')}")
+
+    data = payload.get("data")
+    if not data:
+        return None
+
+    nominal = data.get("Номинальность") or {}
+    fin = data.get("ФинРиски") or {}
+    balance = data.get("Баланс") or {}
+    factors = [
+        ReliabilityFactor(code=f.get("Код", ""), kind=f.get("Тип", ""), weight=f.get("Вес") or 0.0, text=f.get("Текст", ""))
+        for f in (data.get("Факторы") or [])
+    ]
+
+    return Reliability(
+        scale=data.get("Масштаб"),
+        nominal_level=nominal.get("Уровень"),
+        nominal_label=nominal.get("Наим", ""),
+        fin_risk_level=fin.get("Уровень"),
+        fin_risk_label=fin.get("Наим", ""),
+        positive_pct=balance.get("Полож"),
+        attention_pct=balance.get("ТрВним"),
+        negative_pct=balance.get("Негатив"),
+        factors=factors,
+        raw=data,
+    )
 
 
 async def get_company(inn: str, api_key: str) -> CheckoCompany | None:
