@@ -5,7 +5,9 @@ from dataclasses import dataclass, field
 from dadata_client import get_party, DaDataParty, DaDataError
 from checko_client import (
     get_company, get_finances, get_enforcements, get_legal_cases, get_inspections, get_reliability, get_contracts,
-    CheckoCompany, FinanceYear, Enforcement, LegalCasesSummary, Inspection, Reliability, Contract, CheckoError,
+    get_entrepreneur, get_person, get_fedresurs, get_bankruptcy_messages, get_timeline,
+    CheckoCompany, FinanceYear, Enforcement, LegalCasesSummary, Inspection, Reliability, Contract,
+    Entrepreneur, Person, FedresursMessage, BankruptcyMessage, TimelineEvent, CheckoError,
 )
 from company_analysis import analyze_nominal_director, analyze_shell_company, Verdict
 from npd_check import check_npd_status
@@ -23,6 +25,12 @@ class CardResult:
     reliability: Reliability | None = None
     contracts: list[Contract] = field(default_factory=list)
     npd_status: bool | None = None
+    entrepreneur: Entrepreneur | None = None
+    person: Person | None = None
+    director_person: Person | None = None
+    fedresurs: list[FedresursMessage] = field(default_factory=list)
+    bankruptcy_messages: list[BankruptcyMessage] = field(default_factory=list)
+    timeline: list[TimelineEvent] = field(default_factory=list)
     nominal_director: Verdict | None = None
     shell_company: Verdict | None = None
     dadata_error: str | None = None
@@ -31,7 +39,7 @@ class CardResult:
 
     @property
     def found(self) -> bool:
-        return self.dadata is not None or self.checko is not None
+        return self.dadata is not None or self.checko is not None or self.entrepreneur is not None or self.person is not None
 
 
 async def build_card(inn: str, dadata_key: str, dadata_secret: str, checko_key: str) -> CardResult:
@@ -89,6 +97,42 @@ async def build_card(inn: str, dadata_key: str, dadata_secret: str, checko_key: 
         except CheckoError as e:
             return [], str(e)
 
+    is_person_inn = len(inn) == 12
+
+    async def _entrepreneur():
+        if not is_person_inn:
+            return None, None
+        try:
+            return await get_entrepreneur(inn, checko_key), None
+        except CheckoError as e:
+            return None, str(e)
+
+    async def _person():
+        if not is_person_inn:
+            return None, None
+        try:
+            return await get_person(inn, checko_key), None
+        except CheckoError as e:
+            return None, str(e)
+
+    async def _fedresurs():
+        try:
+            return await get_fedresurs(inn, checko_key), None
+        except CheckoError as e:
+            return [], str(e)
+
+    async def _bankruptcy():
+        try:
+            return await get_bankruptcy_messages(inn, checko_key), None
+        except CheckoError as e:
+            return [], str(e)
+
+    async def _timeline():
+        try:
+            return await get_timeline(inn, checko_key), None
+        except CheckoError as e:
+            return [], str(e)
+
     (
         (dadata_res, dadata_err),
         (checko_res, checko_err),
@@ -99,11 +143,32 @@ async def build_card(inn: str, dadata_key: str, dadata_secret: str, checko_key: 
         (rel_res, _rel_err),
         npd_res,
         (contracts_res, _contracts_err),
+        (entrepreneur_res, _entr_err),
+        (person_res, _person_err),
+        (fedresurs_res, _fedr_err),
+        (bankruptcy_res, _bank_err),
+        (timeline_res, _tl_err),
     ) = await asyncio.gather(
-        _dadata(), _checko(), _finances(), _enforcements(), _legal_cases(), _inspections(), _reliability(), _npd(), _contracts(),
+        _dadata(), _checko(), _finances(), _enforcements(), _legal_cases(), _inspections(), _reliability(), _npd(),
+        _contracts(), _entrepreneur(), _person(), _fedresurs(), _bankruptcy(), _timeline(),
     )
 
-    nominal = analyze_nominal_director(checko_res, dadata_res)
+    # ИНН руководителя известен только после того, как пришли основные данные —
+    # догоняем отдельным запросом официальные флаги риска именно для человека
+    director_person = None
+    director_inn = None
+    if checko_res and checko_res.directors:
+        current = next((d for d in checko_res.directors if not d.end_date), checko_res.directors[-1])
+        director_inn = current.inn
+    if not director_inn and dadata_res and dadata_res.management:
+        director_inn = dadata_res.management.inn
+    if director_inn and len(director_inn) == 12:
+        try:
+            director_person = await get_person(director_inn, checko_key)
+        except CheckoError:
+            director_person = None
+
+    nominal = analyze_nominal_director(checko_res, dadata_res, director_person)
     shell = analyze_shell_company(checko_res, dadata_res, fin_res, enf_res, legal_res, insp_res)
 
     return CardResult(
@@ -117,6 +182,12 @@ async def build_card(inn: str, dadata_key: str, dadata_secret: str, checko_key: 
         reliability=rel_res,
         contracts=contracts_res,
         npd_status=npd_res,
+        entrepreneur=entrepreneur_res,
+        person=person_res,
+        director_person=director_person,
+        fedresurs=fedresurs_res,
+        bankruptcy_messages=bankruptcy_res,
+        timeline=timeline_res,
         nominal_director=nominal,
         shell_company=shell,
         dadata_error=dadata_err,
@@ -164,10 +235,75 @@ def format_card(result: CardResult) -> str:
             f"Проверьте номер или попробуйте позже."
         )
 
-    name = (d.name_short if d else None) or (c.name_short if c else None) or result.inn
+    name = (d.name_short if d else None) or (c.name_short if c else None) or (result.entrepreneur.fio if result.entrepreneur else None) or (result.person.fio if result.person else None) or result.inn
     lines = [f"<b>{name}</b>", f"ИНН {result.inn}"]
     if d and d.ogrn:
         lines.append(f"ОГРН {d.ogrn}")
+    if result.entrepreneur and result.entrepreneur.ogrnip:
+        lines.append(f"ОГРНИП {result.entrepreneur.ogrnip}")
+
+    if result.entrepreneur:
+        e = result.entrepreneur
+        lines.append("")
+        lines.append("<b>Данные ИП (ЕГРИП)</b>")
+        lines.append(f"<b>Статус:</b> {e.status or '—'}")
+        if e.reg_date:
+            lines.append(f"<b>Регистрация:</b> {e.reg_date}")
+        if e.region:
+            lines.append(f"<b>Регион:</b> {e.region}")
+        if e.okved_name:
+            extra = f" (+{e.okved_extra_count})" if e.okved_extra_count else ""
+            lines.append(f"<b>Вид деятельности:</b> {e.okved_name}{extra}")
+        if e.tax_system:
+            lines.append(f"<b>Налоговый режим:</b> {e.tax_system}")
+        if e.is_smb:
+            lines.append(f"<b>МСП:</b> да" + (f", {e.smb_category}" if e.smb_category else ""))
+        if e.licenses:
+            lines.append(f"<b>Лицензии:</b> {len(e.licenses)}")
+            for lic in e.licenses[:2]:
+                lines.append(f"  • №{lic['number']} от {lic['date']} — {lic['org']}")
+        if e.trademarks:
+            lines.append(f"<b>Товарные знаки:</b> {len(e.trademarks)}")
+        marks = []
+        if e.mass_director:
+            marks.append("🔴 массовый руководитель")
+        if e.mass_founder:
+            marks.append("🔴 массовый учредитель")
+        if e.unfair_supplier:
+            marks.append("🔴 недобросовестный поставщик")
+        if marks:
+            lines.append(" ".join(marks))
+        if e.managed_orgs:
+            lines.append(f"<b>Руководитель в организациях:</b> {len(e.managed_orgs)}")
+            for o in e.managed_orgs[:3]:
+                lines.append(f"  • {o['name']} (ИНН {o['inn']}), {o['status']}")
+        if e.founded_orgs:
+            lines.append(f"<b>Учредитель в организациях:</b> {len(e.founded_orgs)}")
+            for o in e.founded_orgs[:3]:
+                lines.append(f"  • {o['name']} (ИНН {o['inn']}), {o['status']}")
+
+    if result.person and not result.entrepreneur:
+        p = result.person
+        lines.append("")
+        lines.append("<b>Данные физлица</b>")
+        if p.sanctions:
+            lines.append(f"🔴 <b>Под санкциями:</b> {', '.join(p.sanctions_countries) or 'да'}")
+        if p.mass_director:
+            lines.append("🔴 Массовый руководитель")
+        if p.mass_founder:
+            lines.append("🔴 Массовый учредитель")
+        if p.unfair_supplier:
+            lines.append("🔴 В реестре недобросовестных поставщиков")
+        if p.managed_orgs:
+            lines.append(f"<b>Руководитель в организациях:</b> {len(p.managed_orgs)}")
+            for o in p.managed_orgs[:5]:
+                lines.append(f"  • {o['name']} (ИНН {o['inn']}), {o['status']}")
+        if p.founded_orgs:
+            lines.append(f"<b>Учредитель в организациях:</b> {len(p.founded_orgs)}")
+            for o in p.founded_orgs[:5]:
+                lines.append(f"  • {o['name']} (ИНН {o['inn']}), {o['status']}")
+        if p.ip_records:
+            lines.append(f"<b>Статус ИП:</b> {len(p.ip_records)} запись(ей)")
 
     lines.append("")
     lines.append("<b>Основное</b>")
@@ -199,7 +335,10 @@ def format_card(result: CardResult) -> str:
         if result.npd_status is not None:
             lines.append(f"<b>Самозанятый (НПД):</b> {'✅ да' if result.npd_status else 'нет'}")
     else:
-        lines.append(f"⚠️ DaData недоступна: {result.dadata_error or 'нет данных'}")
+        if result.entrepreneur or result.person:
+            lines.append("(основные данные уже показаны выше, из ЕГРИП/Checko)")
+        else:
+            lines.append(f"⚠️ DaData недоступна: {result.dadata_error or 'нет данных'}")
 
     # Текущий руководитель — берём имя из DaData (обычно первым приходит), но
     # ИНН/должность/дату — из Checko, у DaData поля ИНН в этом блоке нет вообще
@@ -382,6 +521,29 @@ def format_card(result: CardResult) -> str:
             lines.append(f"• №{ct.reg_number} от {ct.date} — {role}{price_str}" + (f"\n  {obj}" if obj else "") + (f"\n  {ct.eis_url}" if ct.eis_url else ""))
         if len(result.contracts) > 3:
             lines.append(f"…и ещё {len(result.contracts) - 3}")
+
+    if result.bankruptcy_messages:
+        lines.append("")
+        lines.append(f"<b>Записи ЕФРСБ (банкротство)</b> — {len(result.bankruptcy_messages)}")
+        for b in sorted(result.bankruptcy_messages, key=lambda x: x.date, reverse=True)[:3]:
+            case_str = f", дело №{b.case_number}" if b.case_number else ""
+            lines.append(f"• {b.date} — {b.type_name}{case_str}" + (f"\n  {b.url}" if b.url else ""))
+        if len(result.bankruptcy_messages) > 3:
+            lines.append(f"…и ещё {len(result.bankruptcy_messages) - 3}")
+
+    if result.fedresurs:
+        lines.append("")
+        lines.append(f"<b>Сообщения Федресурса</b> — {len(result.fedresurs)}")
+        for f in sorted(result.fedresurs, key=lambda x: x.date, reverse=True)[:3]:
+            lines.append(f"• {f.date} — {f.type_name}" + (f"\n  {f.url}" if f.url else ""))
+        if len(result.fedresurs) > 3:
+            lines.append(f"…и ещё {len(result.fedresurs) - 3}")
+
+    if result.timeline:
+        lines.append("")
+        lines.append(f"<b>История изменений</b> (последние {min(5, len(result.timeline))} из {len(result.timeline)})")
+        for ev in result.timeline[-5:]:
+            lines.append(f"• {ev.date} — {ev.text}")
 
     if c:
         flag_lines = []
