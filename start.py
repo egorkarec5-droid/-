@@ -27,7 +27,7 @@ from pdf_export import build_dossier_pdf, build_multi_dossier_pdf
 from relations_search import find_connections
 import db
 from dadata_client import get_party, DaDataError
-from checko_client import get_company, get_finances, search_by_name, CheckoError
+from checko_client import get_company, get_finances, get_reliability, search_by_name, CheckoError
 
 router = Router()
 
@@ -540,6 +540,12 @@ async def debug_raw(message: Message):
         await _send_raw(message, "Checko finances", fin_raw)
     except CheckoError as e:
         await message.answer(f"Checko finances error: {e}")
+
+    try:
+        rel = await get_reliability(inn, CHECKO_API_KEY)
+        await _send_raw(message, "Checko reliability", rel.raw if rel else {})
+    except CheckoError as e:
+        await message.answer(f"Checko reliability error: {e}")
 
 
 async def _cleanup_loop():
