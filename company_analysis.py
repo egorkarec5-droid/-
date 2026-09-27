@@ -59,7 +59,14 @@ def analyze_nominal_director(checko, dadata) -> Verdict:
                 flags.append(AnalysisFlag("Массовый руководитель", f"{d.name} — признак массовости по данным Checko", 35))
             if d.unreliable:
                 flags.append(AnalysisFlag("Недостоверность сведений о директоре", f"{d.name} — отметка недостоверности в ЕГРЮЛ", 30))
-    if dadata and dadata.management and not dadata.management.inn and not (checko and checko.managing_org):
+    has_director_inn = bool(dadata and dadata.management and dadata.management.inn)
+    if not has_director_inn and checko and checko.directors:
+        if dadata and dadata.management:
+            match = next((di for di in checko.directors if di.name == dadata.management.name), None)
+            has_director_inn = bool(match and match.inn)
+        else:
+            has_director_inn = any(di.inn for di in checko.directors)
+    if dadata and dadata.management and not has_director_inn and not (checko and checko.managing_org):
         flags.append(AnalysisFlag("Нет ИНН директора в открытых данных", "затрудняет проверку, само по себе не доказательство", 5))
 
     score = min(100, sum(f.weight for f in flags))
