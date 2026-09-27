@@ -48,6 +48,18 @@ async def global_error_handler(event, message: Message, state: FSMContext):
     )
     return True
 
+
+@router.error(F.update.callback_query.as_("callback"))
+async def global_error_handler_callback(event, callback: CallbackQuery):
+    """То же самое, но для нажатий на инлайн-кнопки (адмнинка и т.п.) — раньше
+    ошибки здесь проглатывались молча, кнопка выглядела так, будто "не работает"."""
+    logging.exception("Необработанная ошибка при обработке callback", exc_info=event.exception)
+    try:
+        await callback.answer("⚠️ Ошибка при обработке. Попробуйте ещё раз.", show_alert=True)
+    except Exception:
+        logging.exception("Не удалось ответить на callback после ошибки")
+    return True
+
 WELCOME = (
     "👋 <b>Привет! Я — Досье Плюс.</b>\n\n"
     "Проверяю компании и ИП на признаки риска: подставные фирмы, подозрительные платежи, "
