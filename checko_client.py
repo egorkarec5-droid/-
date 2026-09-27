@@ -15,6 +15,7 @@ CHECKO_SEARCH_URL = "https://api.checko.ru/v2/search"
 CHECKO_LEGAL_CASES_URL = "https://api.checko.ru/v2/legal-cases"
 CHECKO_INSPECTIONS_URL = "https://api.checko.ru/v2/inspections"
 CHECKO_RELIABILITY_URL = "https://api.checko.ru/v2/reliability"
+CHECKO_CONTRACTS_URL = "https://api.checko.ru/v2/contracts"
 
 
 class CheckoError(Exception):
@@ -354,6 +355,57 @@ async def get_reliability(inn: str, api_key: str) -> Reliability | None:
         factors=factors,
         raw=data,
     )
+
+
+@dataclass
+class Contract:
+    reg_number: str
+    eis_url: str
+    date: str
+    price: float | None
+    law: str
+    customer_inn: str
+    customer_name: str
+    supplier_inns: list[str]
+    supplier_names: list[str]
+    objects: list[str]
+
+
+async def get_contracts(inn: str, api_key: str, law: str = "44", role: str | None = None, limit: int = 50) -> list[Contract]:
+    """Госконтракты — /v2/contracts. Схема подтверждена документацией.
+    law: "44" | "94" | "223". role: "customer" | "supplier" | None (оба)."""
+    params = {"key": api_key, "inn": inn, "law": law, "limit": str(limit)}
+    if role:
+        params["role"] = role
+    async with aiohttp.ClientSession() as session:
+        async with session.get(CHECKO_CONTRACTS_URL, params=params) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                raise CheckoError(f"Checko (contracts) вернул {resp.status}: {text[:300]}")
+            payload = await resp.json()
+
+    if payload.get("meta", {}).get("status") not in (None, "ok"):
+        raise CheckoError(f"Checko (contracts): {payload.get('meta')}")
+
+    records = (payload.get("data") or {}).get("Записи") or []
+    contracts = []
+    for r in records:
+        customer = r.get("Заказ") or {}
+        suppliers = r.get("Постав") or []
+        objects = r.get("Объекты") or []
+        contracts.append(Contract(
+            reg_number=r.get("РегНомер", ""),
+            eis_url=r.get("СтрЕИС", ""),
+            date=r.get("Дата", ""),
+            price=_to_float(r.get("Цена")),
+            law=law,
+            customer_inn=customer.get("ИНН", ""),
+            customer_name=customer.get("НаимСокр", "") or customer.get("НаимПолн", ""),
+            supplier_inns=[s.get("ИНН", "") for s in suppliers if s.get("ИНН")],
+            supplier_names=[s.get("НаимСокр") or s.get("НаимПолн") or s.get("ФИО", "") for s in suppliers],
+            objects=[o.get("Наим", "") for o in objects if o.get("Наим")],
+        ))
+    return contracts
 
 
 async def get_company(inn: str, api_key: str) -> CheckoCompany | None:
