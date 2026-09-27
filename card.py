@@ -4,8 +4,8 @@ from dataclasses import dataclass, field
 
 from dadata_client import get_party, DaDataParty, DaDataError
 from checko_client import (
-    get_company, get_finances, get_enforcements, get_legal_cases, get_inspections, get_reliability,
-    CheckoCompany, FinanceYear, Enforcement, LegalCasesSummary, Inspection, Reliability, CheckoError,
+    get_company, get_finances, get_enforcements, get_legal_cases, get_inspections, get_reliability, get_contracts,
+    CheckoCompany, FinanceYear, Enforcement, LegalCasesSummary, Inspection, Reliability, Contract, CheckoError,
 )
 from company_analysis import analyze_nominal_director, analyze_shell_company, Verdict
 from npd_check import check_npd_status
@@ -21,6 +21,7 @@ class CardResult:
     legal_cases: LegalCasesSummary | None = None
     inspections: list[Inspection] = field(default_factory=list)
     reliability: Reliability | None = None
+    contracts: list[Contract] = field(default_factory=list)
     npd_status: bool | None = None
     nominal_director: Verdict | None = None
     shell_company: Verdict | None = None
@@ -82,6 +83,12 @@ async def build_card(inn: str, dadata_key: str, dadata_secret: str, checko_key: 
     async def _npd():
         return await check_npd_status(inn)
 
+    async def _contracts():
+        try:
+            return await get_contracts(inn, checko_key, law="44"), None
+        except CheckoError as e:
+            return [], str(e)
+
     (
         (dadata_res, dadata_err),
         (checko_res, checko_err),
@@ -91,8 +98,9 @@ async def build_card(inn: str, dadata_key: str, dadata_secret: str, checko_key: 
         (insp_res, _insp_err),
         (rel_res, _rel_err),
         npd_res,
+        (contracts_res, _contracts_err),
     ) = await asyncio.gather(
-        _dadata(), _checko(), _finances(), _enforcements(), _legal_cases(), _inspections(), _reliability(), _npd(),
+        _dadata(), _checko(), _finances(), _enforcements(), _legal_cases(), _inspections(), _reliability(), _npd(), _contracts(),
     )
 
     nominal = analyze_nominal_director(checko_res, dadata_res)
@@ -107,6 +115,7 @@ async def build_card(inn: str, dadata_key: str, dadata_secret: str, checko_key: 
         legal_cases=legal_res,
         inspections=insp_res,
         reliability=rel_res,
+        contracts=contracts_res,
         npd_status=npd_res,
         nominal_director=nominal,
         shell_company=shell,
@@ -358,6 +367,21 @@ def format_card(result: CardResult) -> str:
         lines.append("")
         lines.append(f"<b>Проверки</b> — {len(result.inspections)}" + (f", из них с нарушениями: {len(with_violations)}" if with_violations else ""))
         lines.append(f"Подробности по ИНН: https://proverki.gov.ru/portal (поиск по ИНН {result.inn})")
+
+    if result.contracts:
+        as_customer = [ct for ct in result.contracts if ct.customer_inn == result.inn]
+        as_supplier = [ct for ct in result.contracts if result.inn in ct.supplier_inns]
+        total_price = sum(ct.price or 0 for ct in result.contracts)
+        lines.append("")
+        lines.append(f"<b>Госконтракты (44-ФЗ)</b> — {len(result.contracts)} (заказчик: {len(as_customer)}, поставщик: {len(as_supplier)})")
+        lines.append(f"Общая сумма: {total_price:,.0f} ₽".replace(",", " "))
+        for ct in sorted(result.contracts, key=lambda x: x.date, reverse=True)[:3]:
+            role = "заказчик" if ct.customer_inn == result.inn else "поставщик"
+            obj = ct.objects[0] if ct.objects else ""
+            price_str = f", {ct.price:,.0f} ₽".replace(",", " ") if ct.price else ""
+            lines.append(f"• №{ct.reg_number} от {ct.date} — {role}{price_str}" + (f"\n  {obj}" if obj else "") + (f"\n  {ct.eis_url}" if ct.eis_url else ""))
+        if len(result.contracts) > 3:
+            lines.append(f"…и ещё {len(result.contracts) - 3}")
 
     if c:
         flag_lines = []
