@@ -23,7 +23,7 @@ from rules import assess_all
 from report import format_summary_line, format_top_risks, DISCLAIMER
 from card import build_card, format_card, split_for_telegram
 from schemes import render_money_flow, FlowRow, render_relations, RelationRow
-from pdf_export import build_dossier_pdf
+from pdf_export import build_dossier_pdf, build_multi_dossier_pdf
 import db
 from dadata_client import get_party, DaDataError
 from checko_client import get_company, get_finances, search_by_name, CheckoError
@@ -357,7 +357,7 @@ async def start_inn_list(message: Message, state: FSMContext):
     await state.set_state(ListStates.waiting_list)
     await message.answer(
         f"Пришлите список ИНН — каждый на новой строке, через запятую или пробел "
-        f"(до {MAX_LIST_SIZE} штук за раз). Проверю каждый и пришлю сводку."
+        f"(до {MAX_LIST_SIZE} штук за раз). Соберу один PDF со всеми компаниями (каждая с новой страницы)."
     )
 
 
@@ -373,33 +373,50 @@ async def receive_inn_list(message: Message, state: FSMContext):
         await message.answer(f"Многовато за раз — нашёл {len(inns)}, лимит {MAX_LIST_SIZE}. Разбейте на части.")
         return
 
-    await message.answer(f"⏳ Проверяю {len(inns)} ИНН, это займёт немного времени...")
+    await message.answer(f"⏳ Проверяю {len(inns)} ИНН, соберу один PDF на все компании сразу...")
 
-    lines = [f"<b>Результаты по {len(inns)} ИНН</b>", ""]
+    sections = []
+    summary_lines = []
     for inn in inns:
         try:
             result = await build_card(inn, DADATA_API_KEY, DADATA_SECRET_KEY, CHECKO_API_KEY)
         except Exception:
             logging.exception("Ошибка при проверке ИНН %s в списке", inn)
-            lines.append(f"❌ {inn} — ошибка проверки")
+            summary_lines.append(f"❌ {inn} — ошибка проверки")
             continue
 
         if not result.found:
-            lines.append(f"❓ {inn} — не найдено")
+            summary_lines.append(f"❓ {inn} — не найдено")
             continue
+
+        text = format_card(result)
+        await db.set_cached_card(inn, text)
+        await db.log_check(message.from_user.id, "counterparty", inn, text.split("\n")[0][:200])
 
         name = (result.dadata.name_short if result.dadata else None) or (result.checko.name_short if result.checko else inn)
         levels = [v.level for v in (result.nominal_director, result.shell_company) if v]
         worst = "high" if "high" in levels else "medium" if "medium" in levels else "low"
         emoji = {"low": "🟢", "medium": "🟡", "high": "🔴"}[worst]
-        nd_label = result.nominal_director.label if result.nominal_director else "—"
-        sc_label = result.shell_company.label if result.shell_company else "—"
-        lines.append(f"{emoji} <b>{name}</b> (ИНН {inn})")
-        lines.append(f"   директор: {nd_label} · техническая: {sc_label}")
+        summary_lines.append(f"{emoji} {name} (ИНН {inn})")
 
-        await db.log_check(message.from_user.id, "counterparty", inn, f"{name} — список ИНН")
+        sections.append((name, f"ИНН {inn} · сформировано ботом Досье Плюс", text))
 
-    await message.answer("\n".join(lines), reply_markup=main_menu)
+    await message.answer("\n".join(summary_lines) or "Ничего не найдено.")
+
+    if sections:
+        try:
+            pdf_bytes = build_multi_dossier_pdf(sections)
+            await message.answer_document(
+                BufferedInputFile(pdf_bytes, filename=f"Досье_список_{len(sections)}_компаний.pdf"),
+                caption=f"📥 Сводное PDF-досье — {len(sections)} компаний (каждая с новой страницы)",
+                reply_markup=main_menu,
+            )
+        except Exception:
+            logging.exception("Ошибка при генерации сводного PDF для списка ИНН")
+            await message.answer("⚠️ Данные получены, но не удалось собрать общий PDF.", reply_markup=main_menu)
+    else:
+        await message.answer("Не по чему формировать PDF.", reply_markup=main_menu)
+
     await state.clear()
 
 
