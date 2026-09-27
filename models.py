@@ -19,6 +19,8 @@ class User(Base):
     username: Mapped[str | None] = mapped_column(String, nullable=True)
     first_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     invited_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    status: Mapped[str] = mapped_column(String, default="free")   # free | paid | free_invite | blocked
+    paid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class Check(Base):
