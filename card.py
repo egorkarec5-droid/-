@@ -4,8 +4,8 @@ from dataclasses import dataclass, field
 
 from dadata_client import get_party, DaDataParty, DaDataError
 from checko_client import (
-    get_company, get_finances, get_enforcements, get_legal_cases, get_inspections,
-    CheckoCompany, FinanceYear, Enforcement, LegalCasesSummary, Inspection, CheckoError,
+    get_company, get_finances, get_enforcements, get_legal_cases, get_inspections, get_reliability,
+    CheckoCompany, FinanceYear, Enforcement, LegalCasesSummary, Inspection, Reliability, CheckoError,
 )
 from company_analysis import analyze_nominal_director, analyze_shell_company, Verdict
 
@@ -19,6 +19,7 @@ class CardResult:
     enforcements: list[Enforcement] = field(default_factory=list)
     legal_cases: LegalCasesSummary | None = None
     inspections: list[Inspection] = field(default_factory=list)
+    reliability: Reliability | None = None
     nominal_director: Verdict | None = None
     shell_company: Verdict | None = None
     dadata_error: str | None = None
@@ -70,6 +71,12 @@ async def build_card(inn: str, dadata_key: str, dadata_secret: str, checko_key: 
         except CheckoError as e:
             return [], str(e)
 
+    async def _reliability():
+        try:
+            return await get_reliability(inn, checko_key), None
+        except CheckoError as e:
+            return None, str(e)
+
     (
         (dadata_res, dadata_err),
         (checko_res, checko_err),
@@ -77,7 +84,8 @@ async def build_card(inn: str, dadata_key: str, dadata_secret: str, checko_key: 
         (enf_res, _enf_err),
         (legal_res, _legal_err),
         (insp_res, _insp_err),
-    ) = await asyncio.gather(_dadata(), _checko(), _finances(), _enforcements(), _legal_cases(), _inspections())
+        (rel_res, _rel_err),
+    ) = await asyncio.gather(_dadata(), _checko(), _finances(), _enforcements(), _legal_cases(), _inspections(), _reliability())
 
     nominal = analyze_nominal_director(checko_res, dadata_res)
     shell = analyze_shell_company(checko_res, dadata_res, fin_res, enf_res, legal_res, insp_res)
@@ -90,6 +98,7 @@ async def build_card(inn: str, dadata_key: str, dadata_secret: str, checko_key: 
         enforcements=enf_res,
         legal_cases=legal_res,
         inspections=insp_res,
+        reliability=rel_res,
         nominal_director=nominal,
         shell_company=shell,
         dadata_error=dadata_err,
@@ -355,9 +364,30 @@ def format_card(result: CardResult) -> str:
             lines.append("<b>Флаги риска</b>")
             lines.extend(flag_lines)
 
+    rel = result.reliability
+    if rel:
+        lines.append("")
+        lines.append("<b>📋 Оценка надёжности (Checko, по подходам ФНС)</b>")
+        if rel.scale is not None:
+            lines.append(f"Масштаб бизнеса: {rel.scale}/100")
+        if rel.nominal_level is not None:
+            nom_emoji = {1: "🟢", 2: "🟡", 3: "🔴"}.get(rel.nominal_level, "")
+            lines.append(f"{nom_emoji} Риск номинальности: {rel.nominal_label} (уровень {rel.nominal_level}/3)")
+        if rel.fin_risk_level is not None:
+            fin_emoji = "🟢" if rel.fin_risk_level <= 1 else "🟡" if rel.fin_risk_level <= 3 else "🔴"
+            lines.append(f"{fin_emoji} Финансовые риски: {rel.fin_risk_label} (уровень {rel.fin_risk_level}/5)")
+        if rel.positive_pct is not None:
+            lines.append(f"Баланс факторов: 🟢 {rel.positive_pct}% · 🟡 {rel.attention_pct}% · 🔴 {rel.negative_pct}%")
+        if rel.factors:
+            lines.append("")
+            for f in rel.factors:
+                mark = {"Полож": "🟢", "ТрВним": "🟡", "Негатив": "🔴"}.get(f.kind, "•")
+                lines.append(f"{mark} {f.text}")
+
     if result.nominal_director or result.shell_company:
         lines.append("")
-        lines.append("<b>📊 Расширенная аналитика</b>")
+        lines.append("<b>📊 Дополнительная эвристика бота</b>")
+        lines.append("<i>(своя проверка сверх официальной оценки Checko выше)</i>")
 
         nd = result.nominal_director
         if nd:
