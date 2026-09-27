@@ -24,6 +24,7 @@ from report import format_summary_line, format_top_risks, DISCLAIMER
 from card import build_card, format_card, split_for_telegram
 from schemes import render_money_flow, FlowRow, render_relations, RelationRow
 from pdf_export import build_dossier_pdf, build_multi_dossier_pdf
+from relations_search import find_connections
 import db
 from dadata_client import get_party, DaDataError
 from checko_client import get_company, get_finances, search_by_name, CheckoError
@@ -82,6 +83,10 @@ class CardStates(StatesGroup):
 
 class ListStates(StatesGroup):
     waiting_list = State()
+
+
+class RelationsSearchStates(StatesGroup):
+    waiting_inns = State()
 
 
 # Отслеживаем полученные файлы вне FSMContext, под блокировкой — чтобы два
@@ -263,7 +268,7 @@ async def start_counterparty_check(message: Message, state: FSMContext):
     await message.answer("Введите ИНН организации или ИП (10 или 12 цифр).")
 
 
-MENU_TEXTS = {"📊 Проверить книгу", "🔍 Проверить контрагента", "📋 Список ИНН", "⚙️ Настройки", "ℹ️ Помощь"}
+MENU_TEXTS = {"📊 Проверить книгу", "🔍 Проверить контрагента", "📋 Список ИНН", "🔗 Найти связи", "⚙️ Настройки", "ℹ️ Помощь"}
 
 
 @router.message(CardStates.waiting_inn, F.text, ~F.text.startswith("/"), ~F.text.in_(MENU_TEXTS))
@@ -416,6 +421,84 @@ async def receive_inn_list(message: Message, state: FSMContext):
             await message.answer("⚠️ Данные получены, но не удалось собрать общий PDF.", reply_markup=main_menu)
     else:
         await message.answer("Не по чему формировать PDF.", reply_markup=main_menu)
+
+    await state.clear()
+
+
+MAX_RELATIONS_SIZE = 10
+
+
+@router.message(F.text == "🔗 Найти связи")
+async def start_relations_search(message: Message, state: FSMContext):
+    await state.clear()
+    await state.set_state(RelationsSearchStates.waiting_inns)
+    await message.answer(
+        f"Пришлите от 2 до {MAX_RELATIONS_SIZE} ИНН — каждый на новой строке, через запятую или пробел. "
+        f"Проверю их между собой: общий директор/учредитель (в т.ч. бывшие), общий адрес, "
+        f"совпадающий телефон/e-mail, известные связи по данным Checko."
+    )
+
+
+@router.message(RelationsSearchStates.waiting_inns, F.text, ~F.text.startswith("/"), ~F.text.in_(MENU_TEXTS))
+async def receive_relations_inns(message: Message, state: FSMContext):
+    inns = re.findall(r"\b\d{10}(?:\d{2})?\b", message.text)
+    inns = list(dict.fromkeys(inns))
+
+    if len(inns) < 2:
+        await message.answer("Нужно минимум 2 ИНН, чтобы искать связи между ними. Пришлите ещё раз.")
+        return
+    if len(inns) > MAX_RELATIONS_SIZE:
+        await message.answer(f"Многовато — нашёл {len(inns)}, лимит {MAX_RELATIONS_SIZE}.")
+        return
+
+    await message.answer(f"⏳ Собираю данные по {len(inns)} организациям и сверяю их между собой...")
+
+    results = {}
+    names = {}
+    for inn in inns:
+        try:
+            result = await build_card(inn, DADATA_API_KEY, DADATA_SECRET_KEY, CHECKO_API_KEY)
+        except Exception:
+            logging.exception("Ошибка при проверке ИНН %s для поиска связей", inn)
+            await message.answer(f"❌ {inn} — ошибка проверки, пропускаю")
+            continue
+        if not result.found:
+            await message.answer(f"❓ {inn} — не найдено, пропускаю")
+            continue
+        results[inn] = result
+        name = result.dadata.name_short if result.dadata and result.dadata.name_short else (
+            result.checko.name_short if result.checko else inn
+        )
+        names[inn] = name
+        await db.log_check(message.from_user.id, "counterparty", inn, f"{name} — поиск связей")
+
+    if len(results) < 2:
+        await message.answer("Не набралось хотя бы двух проверенных организаций для сравнения.", reply_markup=main_menu)
+        await state.clear()
+        return
+
+    connections = find_connections(results)
+
+    lines = [f"<b>🔗 Связи между {len(results)} организациями</b>", ""]
+    for inn, name in names.items():
+        lines.append(f"• {name} (ИНН {inn})")
+    lines.append("")
+
+    if not connections:
+        lines.append("Явных связей между этими организациями не найдено по доступным данным.")
+    else:
+        lines.append(f"<b>Найдено связей: {len(connections)}</b>")
+        for conn in connections:
+            lines.append(f"\n🔸 <b>{conn.name_a}</b> ↔ <b>{conn.name_b}</b>")
+            lines.append(f"   {conn.kind}: {conn.detail}")
+
+    lines.append("")
+    lines.append("⚠️ Оценка сформирована автоматически на основе открытых данных и не является юридическим заключением.")
+
+    chunks = split_for_telegram("\n".join(lines))
+    for i, chunk in enumerate(chunks):
+        is_last = i == len(chunks) - 1
+        await message.answer(chunk, reply_markup=main_menu if is_last else None)
 
     await state.clear()
 
