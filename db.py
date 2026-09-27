@@ -51,8 +51,65 @@ async def upsert_user(telegram_id: int, username: str | None, invited_by: int | 
     async with _session_maker() as session:
         existing = await session.get(User, telegram_id)
         if existing is None:
-            session.add(User(telegram_id=telegram_id, username=username, invited_by=invited_by))
+            status = "free_invite" if invited_by else "free"
+            session.add(User(telegram_id=telegram_id, username=username, invited_by=invited_by, status=status))
             await session.commit()
+        elif username and existing.username != username:
+            existing.username = username
+            await session.commit()
+
+
+async def list_users(limit: int = 50, offset: int = 0) -> list[User]:
+    if not _enabled():
+        return []
+    async with _session_maker() as session:
+        result = await session.execute(
+            select(User).order_by(User.first_seen.desc()).limit(limit).offset(offset)
+        )
+        return list(result.scalars().all())
+
+
+async def count_users() -> int:
+    if not _enabled():
+        return 0
+    from sqlalchemy import func
+    async with _session_maker() as session:
+        return (await session.execute(select(func.count()).select_from(User))).scalar_one()
+
+
+async def get_user(telegram_id: int) -> User | None:
+    if not _enabled():
+        return None
+    async with _session_maker() as session:
+        return await session.get(User, telegram_id)
+
+
+async def set_user_status(telegram_id: int, status: str, paid_until: datetime | None = None) -> bool:
+    if not _enabled():
+        return False
+    async with _session_maker() as session:
+        user = await session.get(User, telegram_id)
+        if not user:
+            return False
+        user.status = status
+        user.paid_until = paid_until
+        await session.commit()
+        return True
+
+
+async def extend_paid(telegram_id: int, days: int) -> datetime:
+    if not _enabled():
+        return datetime.now(timezone.utc)
+    async with _session_maker() as session:
+        user = await session.get(User, telegram_id)
+        if not user:
+            raise ValueError("Пользователь не найден")
+        base = user.paid_until if (user.paid_until and user.paid_until > datetime.now(timezone.utc)) else datetime.now(timezone.utc)
+        new_until = base + timedelta(days=days)
+        user.status = "paid"
+        user.paid_until = new_until
+        await session.commit()
+        return new_until
 
 
 async def log_check(requested_by: int, kind: str, inn: str | None, summary: str | None):
@@ -102,6 +159,19 @@ async def set_cached_card(inn: str, card_text: str):
         await session.commit()
 
 
+async def invalidate_cache(inn: str) -> bool:
+    """Удаляет кэш конкретного ИНН — полезно при отладке, чтобы не ждать сутки TTL."""
+    if not _enabled():
+        return False
+    async with _session_maker() as session:
+        existing = await session.get(CounterpartyCache, inn)
+        if existing:
+            await session.delete(existing)
+            await session.commit()
+            return True
+        return False
+
+
 async def cleanup_old_data():
     if not _enabled():
         return
@@ -125,9 +195,12 @@ async def get_stats() -> dict:
             select(func.count()).select_from(Check).where(Check.created_at > now - timedelta(days=1))
         )).scalar_one()
         checks_total = (await session.execute(select(func.count()).select_from(Check))).scalar_one()
+        status_rows = await session.execute(select(User.status, func.count()).group_by(User.status))
+        by_status = dict(status_rows.all())
     return {
         "enabled": True,
         "users": users_count,
         "checks_today": checks_today,
         "checks_total": checks_total,
+        "by_status": by_status,
     }
