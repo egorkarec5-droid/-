@@ -13,6 +13,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import Message, BufferedInputFile
 
 import json
+import re
 
 from config import BOT_TOKEN, OWNER_ID, DADATA_API_KEY, DADATA_SECRET_KEY, CHECKO_API_KEY
 from keyboards import main_menu
@@ -22,6 +23,7 @@ from rules import assess_all
 from report import format_summary_line, format_top_risks, DISCLAIMER
 from card import build_card, format_card
 from schemes import render_money_flow, FlowRow, render_relations, RelationRow
+from pdf_export import build_dossier_pdf
 import db
 from dadata_client import get_party, DaDataError
 from checko_client import get_company, get_finances, search_by_name, CheckoError
@@ -220,6 +222,16 @@ async def run_analysis(message: Message, state: FSMContext, purchases_path: str,
         except Exception:
             logging.exception("Ошибка при рендере схемы платежей")
 
+    try:
+        report_text = f"<b>Отчёт по книге покупок/продаж</b>\n{summary_line}\n\n" + format_top_risks(summaries, assessments) + DISCLAIMER
+        pdf_bytes = build_dossier_pdf("Отчёт по книге", "сформировано ботом Досье Плюс", report_text)
+        await message.answer_document(
+            BufferedInputFile(pdf_bytes, filename="Отчёт_по_книге.pdf"),
+            caption="📥 PDF-отчёт по книге",
+        )
+    except Exception:
+        logging.exception("Ошибка при генерации PDF-отчёта по книге")
+
     await state.clear()
 
 
@@ -283,6 +295,17 @@ async def receive_inn(message: Message, state: FSMContext):
 
     await db.log_check(message.from_user.id, "counterparty", inn, text.split("\n")[0][:200])
     await message.answer(text, reply_markup=main_menu)
+
+    title_match = re.search(r"<b>(.*?)</b>", text)
+    pdf_title = title_match.group(1) if title_match else inn
+    try:
+        pdf_bytes = build_dossier_pdf(pdf_title, f"ИНН {inn} · сформировано ботом Досье Плюс", text)
+        await message.answer_document(
+            BufferedInputFile(pdf_bytes, filename=f"Досье_{inn}.pdf"),
+            caption="📥 PDF-досье (не официальная выписка из ЕГРЮЛ)",
+        )
+    except Exception:
+        logging.exception("Ошибка при генерации PDF для ИНН %s", inn)
 
     if result and result.checko and result.checko.related_orgs:
         try:
