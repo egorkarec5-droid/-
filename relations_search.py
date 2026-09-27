@@ -92,6 +92,23 @@ def find_connections(results: dict[str, "CardResult"]) -> list[Connection]:
                 if inn_b in related_a or inn_a in related_b:
                     connections.append(Connection(inn_a, name_a, inn_b, name_b, "известная связь (Checko)", "предшественник/преемник или иная зафиксированная связь"))
 
+            # общие госконтракты — прямые сделки друг с другом или совместное участие в одном контракте
+            contracts_a = getattr(res_a, "contracts", None) or []
+            contracts_b = getattr(res_b, "contracts", None) or []
+            seen_regs = set()
+            for ct in contracts_a:
+                if ct.reg_number in seen_regs:
+                    continue
+                if ct.customer_inn == inn_b or inn_b in ct.supplier_inns:
+                    if ct.customer_inn == inn_a and inn_b in ct.supplier_inns:
+                        detail = f"№{ct.reg_number} от {ct.date} — {name_a} заказчик, {name_b} поставщик"
+                    elif ct.customer_inn == inn_b and inn_a in ct.supplier_inns:
+                        detail = f"№{ct.reg_number} от {ct.date} — {name_b} заказчик, {name_a} поставщик"
+                    else:
+                        detail = f"№{ct.reg_number} от {ct.date} — оба в числе поставщиков одного контракта"
+                    connections.append(Connection(inn_a, name_a, inn_b, name_b, "общий госконтракт", detail))
+                    seen_regs.add(ct.reg_number)
+
             # общий адрес — сравниваем независимо от наличия Checko
             addr_a, addr_b = _address(res_a), _address(res_b)
             if addr_a and addr_b and _norm_addr(addr_a) == _norm_addr(addr_b):
