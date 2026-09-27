@@ -258,6 +258,10 @@ def format_card(result: CardResult) -> str:
             lines.append(f"<b>Налоговый режим:</b> {e.tax_system}")
         if e.is_smb:
             lines.append(f"<b>МСП:</b> да" + (f", {e.smb_category}" if e.smb_category else ""))
+        if e.phones:
+            lines.append(f"<b>Телефон:</b> {e.phones[0]}")
+        if e.emails:
+            lines.append(f"<b>E-mail:</b> {e.emails[0]}")
         if e.licenses:
             lines.append(f"<b>Лицензии:</b> {len(e.licenses)}")
             for lic in e.licenses[:2]:
