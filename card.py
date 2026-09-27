@@ -225,7 +225,7 @@ def format_card(result: CardResult) -> str:
                 marks += " 🔴 массовый руководитель"
             if dir_.unreliable:
                 marks += " 🔴 недостоверность"
-            lines.append(f"{dir_.name}" + (f" (ИНН {dir_.inn})" if dir_.inn else "") + (f", {dir_.post}" if dir_.post else "") + period + marks)
+            lines.append(f"• {dir_.name}" + (f" (ИНН {dir_.inn})" if dir_.inn else "") + (f", {dir_.post}" if dir_.post else "") + period + marks)
 
     founders_all = list(d.founders) if d and d.founders else []
     if c and c.founders:
@@ -246,7 +246,7 @@ def format_card(result: CardResult) -> str:
                 marks += " 🔴 массовый учредитель"
             if getattr(f, "unreliable", False):
                 marks += " 🔴 недостоверность"
-            lines.append(f"{f.name}" + (f" (ИНН {f.inn})" if f.inn else "") + share + kind + marks)
+            lines.append(f"• {f.name}" + (f" (ИНН {f.inn})" if f.inn else "") + share + kind + marks)
 
     if c:
         lines.append("")
@@ -383,3 +383,23 @@ def format_card(result: CardResult) -> str:
     )
 
     return "\n".join(lines)
+
+
+def split_for_telegram(text: str, max_len: int = 900) -> list[str]:
+    """Разбивает длинную карточку на несколько сообщений по смысловым блокам
+    (границы — пустая строка между секциями), а не как попало посередине текста —
+    так на телефоне вместо одной бесконечной простыни приходит несколько
+    компактных сообщений, каждое читается с одного взгляда."""
+    sections = text.split("\n\n")
+    chunks: list[str] = []
+    current = ""
+    for section in sections:
+        candidate = (current + "\n\n" + section) if current else section
+        if len(candidate) > max_len and current:
+            chunks.append(current)
+            current = section
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+    return chunks or [text]
