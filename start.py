@@ -16,7 +16,7 @@ import json
 import re
 
 from config import BOT_TOKEN, OWNER_ID, DADATA_API_KEY, DADATA_SECRET_KEY, CHECKO_API_KEY
-from keyboards import main_menu
+from keyboards import main_menu, get_main_menu
 from book_detect import detect_book_type
 from parser import parse_pokupki, parse_prodazhi, summarize, ParseError
 from rules import assess_all
@@ -44,7 +44,7 @@ async def global_error_handler(event, message: Message, state: FSMContext):
         logging.exception("Не удалось сбросить состояние после ошибки")
     await message.answer(
         "⚠️ Что-то пошло не так при обработке запроса. Я сбросил состояние — можно продолжать.",
-        reply_markup=main_menu,
+        reply_markup=menu_for(message.from_user.id),
     )
     return True
 
@@ -99,7 +99,11 @@ class BroadcastStates(StatesGroup):
 _pending_books: dict[int, dict] = {}
 _pending_lock = asyncio.Lock()
 
-MENU_TEXTS = {"📊 Проверить книгу", "🔍 Проверить контрагента", "📋 Список ИНН", "🔗 Найти связи", "⚙️ Настройки", "ℹ️ Помощь"}
+MENU_TEXTS = {"📊 Проверить книгу", "🔍 Проверить контрагента", "📋 Список ИНН", "🔗 Найти связи", "⚙️ Настройки", "ℹ️ Помощь", "🛠 Админка"}
+
+
+def menu_for(user_id: int) -> "ReplyKeyboardMarkup":
+    return get_main_menu(is_owner=(user_id == OWNER_ID))
 
 
 @router.message(CommandStart())
@@ -108,7 +112,7 @@ async def cmd_start(message: Message, command: CommandObject | None = None):
     if command and command.args == "friend":
         invited_by = OWNER_ID
     await db.upsert_user(message.from_user.id, message.from_user.username, invited_by)
-    await message.answer(WELCOME, reply_markup=main_menu)
+    await message.answer(WELCOME, reply_markup=menu_for(message.from_user.id))
 
 
 @router.message(F.text == "ℹ️ Помощь")
@@ -157,6 +161,7 @@ def _admin_main_kb() -> InlineKeyboardMarkup:
 
 
 @router.message(F.text.startswith("/admin"))
+@router.message(F.text == "🛠 Админка")
 async def cmd_admin(message: Message):
     if message.from_user.id != OWNER_ID:
         return
@@ -325,7 +330,7 @@ async def receive_broadcast_text(message: Message, state: FSMContext):
             sent += 1
         except Exception:
             failed += 1
-    await message.answer(f"Рассылка завершена: доставлено {sent}, не удалось {failed}.", reply_markup=main_menu)
+    await message.answer(f"Рассылка завершена: доставлено {sent}, не удалось {failed}.", reply_markup=menu_for(message.from_user.id))
     await state.clear()
 
 
@@ -399,7 +404,7 @@ async def run_analysis(message: Message, state: FSMContext, purchases_path: str,
 
     summary_line = format_summary_line(assessments)
     await message.answer(summary_line)
-    await message.answer(format_top_risks(summaries, assessments) + DISCLAIMER, reply_markup=main_menu)
+    await message.answer(format_top_risks(summaries, assessments) + DISCLAIMER, reply_markup=menu_for(message.from_user.id))
     await db.log_check(message.from_user.id, "book", None, summary_line)
 
     ranked = sorted(assessments.items(), key=lambda kv: kv[1].score, reverse=True)
@@ -490,7 +495,7 @@ async def receive_inn(message: Message, state: FSMContext):
     chunks = split_for_telegram(text)
     for i, chunk in enumerate(chunks):
         is_last = i == len(chunks) - 1
-        await message.answer(chunk, reply_markup=main_menu if is_last else None)
+        await message.answer(chunk, reply_markup=menu_for(message.from_user.id) if is_last else None)
 
     title_match = re.search(r"<b>(.*?)</b>", text)
     pdf_title = title_match.group(1) if title_match else inn
@@ -585,13 +590,13 @@ async def receive_inn_list(message: Message, state: FSMContext):
             await message.answer_document(
                 BufferedInputFile(pdf_bytes, filename=f"Досье_список_{len(sections)}_компаний.pdf"),
                 caption=f"📥 Сводное PDF-досье — {len(sections)} компаний (каждая с новой страницы)",
-                reply_markup=main_menu,
+                reply_markup=menu_for(message.from_user.id),
             )
         except Exception:
             logging.exception("Ошибка при генерации сводного PDF для списка ИНН")
-            await message.answer("⚠️ Данные получены, но не удалось собрать общий PDF.", reply_markup=main_menu)
+            await message.answer("⚠️ Данные получены, но не удалось собрать общий PDF.", reply_markup=menu_for(message.from_user.id))
     else:
-        await message.answer("Не по чему формировать PDF.", reply_markup=main_menu)
+        await message.answer("Не по чему формировать PDF.", reply_markup=menu_for(message.from_user.id))
 
     await state.clear()
 
@@ -644,7 +649,7 @@ async def receive_relations_inns(message: Message, state: FSMContext):
         await db.log_check(message.from_user.id, "counterparty", inn, f"{name} — поиск связей")
 
     if len(results) < 2:
-        await message.answer("Не набралось хотя бы двух проверенных организаций для сравнения.", reply_markup=main_menu)
+        await message.answer("Не набралось хотя бы двух проверенных организаций для сравнения.", reply_markup=menu_for(message.from_user.id))
         await state.clear()
         return
 
@@ -669,7 +674,7 @@ async def receive_relations_inns(message: Message, state: FSMContext):
     chunks = split_for_telegram("\n".join(lines))
     for i, chunk in enumerate(chunks):
         is_last = i == len(chunks) - 1
-        await message.answer(chunk, reply_markup=main_menu if is_last else None)
+        await message.answer(chunk, reply_markup=menu_for(message.from_user.id) if is_last else None)
 
     await state.clear()
 
