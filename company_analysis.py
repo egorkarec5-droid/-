@@ -44,7 +44,7 @@ def _level(score: int) -> str:
     return "low"
 
 
-def analyze_nominal_director(checko, dadata) -> Verdict:
+def analyze_nominal_director(checko, dadata, director_person=None) -> Verdict:
     flags = []
 
     if checko:
@@ -59,6 +59,18 @@ def analyze_nominal_director(checko, dadata) -> Verdict:
                 flags.append(AnalysisFlag("Массовый руководитель", f"{d.name} — признак массовости по данным Checko", 35))
             if d.unreliable:
                 flags.append(AnalysisFlag("Недостоверность сведений о директоре", f"{d.name} — отметка недостоверности в ЕГРЮЛ", 30))
+
+    if director_person:
+        # официальные флаги по самому человеку (/v2/person) — точнее, чем
+        # признаки на уровне компании, и добавляют то, чего там вообще нет (санкции)
+        if director_person.sanctions:
+            countries = ", ".join(director_person.sanctions_countries) if director_person.sanctions_countries else ""
+            flags.append(AnalysisFlag("Директор под санкциями", f"страны: {countries}" if countries else "по данным Checko", 45))
+        if director_person.mass_director and not (checko and checko.flags.mass_director):
+            flags.append(AnalysisFlag("Массовый руководитель (подтверждено по физлицу)", f"числится руководителем ещё в {len(director_person.managed_orgs)} организациях", 35))
+        if len(director_person.managed_orgs) >= 5:
+            flags.append(AnalysisFlag("Директор во множестве организаций", f"руководитель в {len(director_person.managed_orgs)} компаниях одновременно", 20))
+
     has_director_inn = bool(dadata and dadata.management and dadata.management.inn)
     if not has_director_inn and checko and checko.directors:
         if dadata and dadata.management:
