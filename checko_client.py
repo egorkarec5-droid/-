@@ -16,6 +16,11 @@ CHECKO_LEGAL_CASES_URL = "https://api.checko.ru/v2/legal-cases"
 CHECKO_INSPECTIONS_URL = "https://api.checko.ru/v2/inspections"
 CHECKO_RELIABILITY_URL = "https://api.checko.ru/v2/reliability"
 CHECKO_CONTRACTS_URL = "https://api.checko.ru/v2/contracts"
+CHECKO_ENTREPRENEUR_URL = "https://api.checko.ru/v2/entrepreneur"
+CHECKO_PERSON_URL = "https://api.checko.ru/v2/person"
+CHECKO_FEDRESURS_URL = "https://api.checko.ru/v2/fedresurs"
+CHECKO_BANKRUPTCY_URL = "https://api.checko.ru/v2/bankruptcy-messages"
+CHECKO_TIMELINE_URL = "https://api.checko.ru/v2/timeline"
 
 
 class CheckoError(Exception):
@@ -406,6 +411,229 @@ async def get_contracts(inn: str, api_key: str, law: str = "44", role: str | Non
             objects=[o.get("Наим", "") for o in objects if o.get("Наим")],
         ))
     return contracts
+
+
+def _parse_related_orgs(records: list) -> list[dict]:
+    return [
+        {"inn": r.get("ИНН", ""), "name": r.get("НаимСокр", "") or r.get("НаимПолн", ""), "status": r.get("Статус", "")}
+        for r in (records or [])
+    ]
+
+
+@dataclass
+class Entrepreneur:
+    inn: str
+    ogrnip: str
+    fio: str
+    status: str
+    reg_date: str
+    okved: str
+    okved_name: str
+    okved_extra_count: int
+    region: str
+    tax_system: str
+    is_smb: bool
+    smb_category: str
+    licenses: list[dict]
+    trademarks: list[dict]
+    managed_orgs: list[dict]     # СвязРуковод — организации, где это лицо руководитель
+    founded_orgs: list[dict]     # СвязУчред — организации, где это лицо учредитель
+    unfair_supplier: bool
+    mass_director: bool
+    mass_founder: bool
+    bankruptcy_records: list[dict]
+    raw: dict | None = None
+
+
+async def get_entrepreneur(inn: str, api_key: str) -> Entrepreneur | None:
+    """ЕГРИП — /v2/entrepreneur. Отдельный метод специально под ИП,
+    со своей структурой (не такой, как /company)."""
+    async with aiohttp.ClientSession() as session:
+        async with session.get(CHECKO_ENTREPRENEUR_URL, params={"key": api_key, "inn": inn}) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                raise CheckoError(f"Checko (entrepreneur) вернул {resp.status}: {text[:300]}")
+            payload = await resp.json()
+
+    if payload.get("meta", {}).get("status") not in (None, "ok"):
+        raise CheckoError(f"Checko (entrepreneur): {payload.get('meta')}")
+
+    data = payload.get("data")
+    if not data:
+        return None
+
+    okved = data.get("ОКВЭД") or {}
+    smb = data.get("РМСП") or {}
+    status = data.get("Статус") or {}
+
+    return Entrepreneur(
+        inn=data.get("ИНН", ""),
+        ogrnip=data.get("ОГРНИП", ""),
+        fio=data.get("ФИО", ""),
+        status=status.get("Наим", ""),
+        reg_date=data.get("ДатаРег", ""),
+        okved=okved.get("Код", ""),
+        okved_name=okved.get("Наим", ""),
+        okved_extra_count=len(data.get("ОКВЭДДоп") or []),
+        region=(data.get("Регион") or {}).get("Наим", ""),
+        tax_system=", ".join((data.get("Налоги") or {}).get("ОсобРежим") or []) or "ОСН",
+        is_smb=bool(smb),
+        smb_category=smb.get("Кат", "") if isinstance(smb, dict) else "",
+        licenses=[
+            {"number": l.get("Номер", ""), "date": l.get("Дата", ""), "org": l.get("ЛицОрг", ""), "activities": l.get("ВидДеят") or []}
+            for l in (data.get("Лиценз") or [])
+        ],
+        trademarks=[
+            {"id": t.get("ID"), "url": t.get("URL", ""), "date": t.get("ДатаРег", ""), "expires": t.get("ДатаОконч", "")}
+            for t in (data.get("ТоварЗнак") or [])
+        ],
+        managed_orgs=_parse_related_orgs(data.get("СвязРуковод")),
+        founded_orgs=_parse_related_orgs(data.get("СвязУчред")),
+        unfair_supplier=bool(data.get("НедобПост")),
+        mass_director=bool(data.get("МассРуковод")),
+        mass_founder=bool(data.get("МассУчред")),
+        bankruptcy_records=[
+            {"type": b.get("Тип", ""), "date": b.get("Дата", ""), "case": b.get("Дело", "")}
+            for b in (data.get("ЕФРСБ") or [])
+        ],
+        raw=data,
+    )
+
+
+@dataclass
+class Person:
+    inn: str
+    fio: str
+    managed_orgs: list[dict]      # Руковод — где это лицо руководитель
+    founded_orgs: list[dict]      # Учред — где это лицо учредитель
+    ip_records: list[dict]        # ИП — записи об ИП-статусе этого лица
+    trademarks: list[dict]
+    bankruptcy_records: list[dict]
+    unfair_supplier: bool
+    mass_director: bool
+    mass_founder: bool
+    sanctions: bool
+    sanctions_countries: list[str]
+    raw: dict | None = None
+
+
+async def get_person(inn: str, api_key: str) -> Person | None:
+    """Физлицо по ИНН — /v2/person. Показывает все организации, где человек
+    руководитель/учредитель, плюс официальные флаги риска именно для него,
+    а не для компании — точнее для проверки номинальности директора."""
+    async with aiohttp.ClientSession() as session:
+        async with session.get(CHECKO_PERSON_URL, params={"key": api_key, "inn": inn}) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                raise CheckoError(f"Checko (person) вернул {resp.status}: {text[:300]}")
+            payload = await resp.json()
+
+    if payload.get("meta", {}).get("status") not in (None, "ok"):
+        raise CheckoError(f"Checko (person): {payload.get('meta')}")
+
+    data = payload.get("data")
+    if not data:
+        return None
+
+    return Person(
+        inn=data.get("ИНН", ""),
+        fio=data.get("ФИО", ""),
+        managed_orgs=_parse_related_orgs(data.get("Руковод")),
+        founded_orgs=_parse_related_orgs(data.get("Учред")),
+        ip_records=[
+            {"ogrnip": i.get("ОГРНИП", ""), "status": i.get("Статус", ""), "reg_date": i.get("ДатаРег", "")}
+            for i in (data.get("ИП") or [])
+        ],
+        trademarks=[
+            {"id": t.get("ID"), "url": t.get("URL", "")} for t in (data.get("ТоварЗнак") or [])
+        ],
+        bankruptcy_records=[
+            {"type": b.get("Тип", ""), "date": b.get("Дата", ""), "case": b.get("Дело", "")}
+            for b in (data.get("ЕФРСБ") or [])
+        ],
+        unfair_supplier=bool(data.get("НедобПост")),
+        mass_director=bool(data.get("МассРуковод")),
+        mass_founder=bool(data.get("МассУчред")),
+        sanctions=bool(data.get("Санкции")),
+        sanctions_countries=data.get("СанкцииСтраны") or [],
+        raw=data,
+    )
+
+
+@dataclass
+class FedresursMessage:
+    guid: str
+    url: str
+    date: str
+    type_name: str
+
+
+@dataclass
+class BankruptcyMessage:
+    guid: str
+    url: str
+    date: str
+    type_name: str
+    case_number: str
+    court: str
+    decision: str
+
+
+@dataclass
+class TimelineEvent:
+    date: str
+    text: str
+
+
+async def get_fedresurs(inn: str, api_key: str, limit: int = 30) -> list[FedresursMessage]:
+    """Сообщения Федресурса — /v2/fedresurs."""
+    async with aiohttp.ClientSession() as session:
+        async with session.get(CHECKO_FEDRESURS_URL, params={"key": api_key, "inn": inn, "limit": str(limit)}) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                raise CheckoError(f"Checko (fedresurs) вернул {resp.status}: {text[:300]}")
+            payload = await resp.json()
+    if payload.get("meta", {}).get("status") not in (None, "ok"):
+        raise CheckoError(f"Checko (fedresurs): {payload.get('meta')}")
+    records = (payload.get("data") or {}).get("Записи") or []
+    return [
+        FedresursMessage(guid=r.get("GUID", ""), url=r.get("URL", ""), date=r.get("Дата", ""), type_name=r.get("ТипНаим", ""))
+        for r in records
+    ]
+
+
+async def get_bankruptcy_messages(inn: str, api_key: str, limit: int = 30) -> list[BankruptcyMessage]:
+    """Записи ЕФРСБ (реестр банкротств) — /v2/bankruptcy-messages."""
+    async with aiohttp.ClientSession() as session:
+        async with session.get(CHECKO_BANKRUPTCY_URL, params={"key": api_key, "inn": inn, "limit": str(limit)}) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                raise CheckoError(f"Checko (bankruptcy-messages) вернул {resp.status}: {text[:300]}")
+            payload = await resp.json()
+    if payload.get("meta", {}).get("status") not in (None, "ok"):
+        raise CheckoError(f"Checko (bankruptcy-messages): {payload.get('meta')}")
+    records = (payload.get("data") or {}).get("Записи") or []
+    return [
+        BankruptcyMessage(
+            guid=r.get("GUID", ""), url=r.get("URL", ""), date=r.get("Дата", ""), type_name=r.get("ТипНаим", ""),
+            case_number=r.get("НомерДела", ""), court=r.get("Суд", ""), decision=r.get("РешенСуда", ""),
+        )
+        for r in records
+    ]
+
+
+async def get_timeline(inn: str, api_key: str) -> list[TimelineEvent]:
+    """История изменений — /v2/timeline."""
+    async with aiohttp.ClientSession() as session:
+        async with session.get(CHECKO_TIMELINE_URL, params={"key": api_key, "inn": inn}) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                raise CheckoError(f"Checko (timeline) вернул {resp.status}: {text[:300]}")
+            payload = await resp.json()
+    if payload.get("meta", {}).get("status") not in (None, "ok"):
+        raise CheckoError(f"Checko (timeline): {payload.get('meta')}")
+    records = payload.get("data") or []
+    return [TimelineEvent(date=r.get("Дата", ""), text=r.get("Событие", "")) for r in records]
 
 
 async def get_company(inn: str, api_key: str) -> CheckoCompany | None:
