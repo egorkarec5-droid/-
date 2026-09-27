@@ -15,7 +15,7 @@ from aiogram.types import Message, BufferedInputFile, CallbackQuery, InlineKeybo
 import json
 import re
 
-from config import BOT_TOKEN, OWNER_ID, DADATA_API_KEY, DADATA_SECRET_KEY, CHECKO_API_KEY
+from config import BOT_TOKEN, OWNER_ID, DADATA_API_KEY, DADATA_SECRET_KEY, CHECKO_API_KEY, INVITE_CODE
 from keyboards import main_menu, get_main_menu
 from book_detect import detect_book_type
 from parser import parse_pokupki, parse_prodazhi, summarize, ParseError
@@ -132,7 +132,7 @@ def menu_for(user_id: int) -> "ReplyKeyboardMarkup":
 @router.message(CommandStart())
 async def cmd_start(message: Message, command: CommandObject | None = None):
     invited_by = None
-    if command and command.args == "friend":
+    if command and INVITE_CODE and command.args == INVITE_CODE:
         invited_by = OWNER_ID
     await db.upsert_user(message.from_user.id, message.from_user.username, invited_by)
     await message.answer(WELCOME, reply_markup=menu_for(message.from_user.id))
@@ -232,12 +232,22 @@ async def cb_admin_invite(callback: CallbackQuery):
     if callback.from_user.id != OWNER_ID:
         return await callback.answer()
     me = await callback.bot.get_me()
-    link = f"https://t.me/{me.username}?start=friend"
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅ Назад", callback_data="adm:menu")]])
-    await callback.message.edit_text(
-        f"<b>🔗 Пригласить</b>\n\nПереход по этой ссылке даёт бесплатный доступ навсегда:\n{link}",
-        reply_markup=kb,
-    )
+    if not INVITE_CODE:
+        text = (
+            "<b>🔗 Пригласить</b>\n\n"
+            "⚠️ Секретный код приглашения не задан. Добавь переменную окружения "
+            "<code>INVITE_CODE</code> (любое сложное слово, известное только тебе) в Railway и передеплой."
+        )
+    else:
+        link = f"https://t.me/{me.username}?start={INVITE_CODE}"
+        text = (
+            f"<b>🔗 Пригласить</b>\n\n"
+            f"Переход по этой ссылке даёт бесплатный доступ навсегда:\n{link}\n\n"
+            f"Эта ссылка приватная — не публикуй её открыто, только этим кодом определяется, "
+            f"кто пришёл именно от тебя."
+        )
+    await callback.message.edit_text(text, reply_markup=kb)
     await callback.answer()
 
 
