@@ -21,7 +21,7 @@ from book_detect import detect_book_type
 from parser import parse_pokupki, parse_prodazhi, summarize, ParseError
 from rules import assess_all
 from report import format_summary_line, format_top_risks, DISCLAIMER
-from card import build_card, format_card
+from card import build_card, format_card, split_for_telegram
 from schemes import render_money_flow, FlowRow, render_relations, RelationRow
 from pdf_export import build_dossier_pdf
 import db
@@ -80,6 +80,10 @@ class CardStates(StatesGroup):
     waiting_inn = State()
 
 
+class ListStates(StatesGroup):
+    waiting_list = State()
+
+
 # Отслеживаем полученные файлы вне FSMContext, под блокировкой — чтобы два
 # параллельных скачивания (покупки+продажи почти одновременно) не перезаписали
 # друг друга при записи состояния (race condition).
@@ -113,6 +117,19 @@ async def cmd_settings(message: Message):
         lines.append("")
         lines.append("Вы — владелец бота. Админ-панель: /admin")
     await message.answer("\n".join(lines))
+
+
+@router.message(F.text.startswith("/clearcache"))
+async def cmd_clearcache(message: Message):
+    if message.from_user.id != OWNER_ID:
+        return
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip().isdigit():
+        await message.answer("Использование: /clearcache <ИНН>")
+        return
+    inn = parts[1].strip()
+    removed = await db.invalidate_cache(inn)
+    await message.answer(f"Кэш по ИНН {inn} {'очищен' if removed else 'и так был пуст'}.")
 
 
 @router.message(F.text.startswith("/admin"))
@@ -294,7 +311,10 @@ async def receive_inn(message: Message, state: FSMContext):
             text = f"❌ Не удалось получить данные по ИНН {inn}: {e}\nПопробуйте ещё раз или другой ИНН."
 
     await db.log_check(message.from_user.id, "counterparty", inn, text.split("\n")[0][:200])
-    await message.answer(text, reply_markup=main_menu)
+    chunks = split_for_telegram(text)
+    for i, chunk in enumerate(chunks):
+        is_last = i == len(chunks) - 1
+        await message.answer(chunk, reply_markup=main_menu if is_last else None)
 
     title_match = re.search(r"<b>(.*?)</b>", text)
     pdf_title = title_match.group(1) if title_match else inn
@@ -326,6 +346,61 @@ async def receive_inn(message: Message, state: FSMContext):
     await message.answer("Введите следующий ИНН или название, или выберите другое действие кнопкой ниже.")
     # состояние остаётся waiting_inn — можно проверять несколько ИНН подряд
     # без повторного нажатия кнопки; любая другая кнопка меню сбросит его сама
+
+
+MAX_LIST_SIZE = 20
+
+
+@router.message(F.text == "📋 Список ИНН")
+async def start_inn_list(message: Message, state: FSMContext):
+    await state.clear()
+    await state.set_state(ListStates.waiting_list)
+    await message.answer(
+        f"Пришлите список ИНН — каждый на новой строке, через запятую или пробел "
+        f"(до {MAX_LIST_SIZE} штук за раз). Проверю каждый и пришлю сводку."
+    )
+
+
+@router.message(ListStates.waiting_list, F.text, ~F.text.startswith("/"), ~F.text.in_(MENU_TEXTS))
+async def receive_inn_list(message: Message, state: FSMContext):
+    inns = re.findall(r"\b\d{10}(?:\d{2})?\b", message.text)
+    inns = list(dict.fromkeys(inns))  # убираем дубли, сохраняя порядок
+
+    if not inns:
+        await message.answer("Не нашёл ни одного ИНН (10 или 12 цифр) в сообщении. Пришлите ещё раз.")
+        return
+    if len(inns) > MAX_LIST_SIZE:
+        await message.answer(f"Многовато за раз — нашёл {len(inns)}, лимит {MAX_LIST_SIZE}. Разбейте на части.")
+        return
+
+    await message.answer(f"⏳ Проверяю {len(inns)} ИНН, это займёт немного времени...")
+
+    lines = [f"<b>Результаты по {len(inns)} ИНН</b>", ""]
+    for inn in inns:
+        try:
+            result = await build_card(inn, DADATA_API_KEY, DADATA_SECRET_KEY, CHECKO_API_KEY)
+        except Exception:
+            logging.exception("Ошибка при проверке ИНН %s в списке", inn)
+            lines.append(f"❌ {inn} — ошибка проверки")
+            continue
+
+        if not result.found:
+            lines.append(f"❓ {inn} — не найдено")
+            continue
+
+        name = (result.dadata.name_short if result.dadata else None) or (result.checko.name_short if result.checko else inn)
+        levels = [v.level for v in (result.nominal_director, result.shell_company) if v]
+        worst = "high" if "high" in levels else "medium" if "medium" in levels else "low"
+        emoji = {"low": "🟢", "medium": "🟡", "high": "🔴"}[worst]
+        nd_label = result.nominal_director.label if result.nominal_director else "—"
+        sc_label = result.shell_company.label if result.shell_company else "—"
+        lines.append(f"{emoji} <b>{name}</b> (ИНН {inn})")
+        lines.append(f"   директор: {nd_label} · техническая: {sc_label}")
+
+        await db.log_check(message.from_user.id, "counterparty", inn, f"{name} — список ИНН")
+
+    await message.answer("\n".join(lines), reply_markup=main_menu)
+    await state.clear()
 
 
 async def _send_raw(message: Message, label: str, raw: dict):
