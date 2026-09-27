@@ -442,6 +442,8 @@ class Entrepreneur:
     mass_director: bool
     mass_founder: bool
     bankruptcy_records: list[dict]
+    phones: list[str] = field(default_factory=list)
+    emails: list[str] = field(default_factory=list)
     raw: dict | None = None
 
 
@@ -465,6 +467,7 @@ async def get_entrepreneur(inn: str, api_key: str) -> Entrepreneur | None:
     okved = data.get("ОКВЭД") or {}
     smb = data.get("РМСП") or {}
     status = data.get("Статус") or {}
+    contacts = data.get("Контакты") or {}
 
     return Entrepreneur(
         inn=data.get("ИНН", ""),
@@ -496,6 +499,8 @@ async def get_entrepreneur(inn: str, api_key: str) -> Entrepreneur | None:
             {"type": b.get("Тип", ""), "date": b.get("Дата", ""), "case": b.get("Дело", "")}
             for b in (data.get("ЕФРСБ") or [])
         ],
+        phones=contacts.get("Тел", []) or [],
+        emails=contacts.get("Емэйл", []) or [],
         raw=data,
     )
 
