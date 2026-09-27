@@ -10,7 +10,7 @@ from aiogram.filters import CommandStart, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import Message, BufferedInputFile
+from aiogram.types import Message, BufferedInputFile, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
 import json
 import re
@@ -89,11 +89,17 @@ class RelationsSearchStates(StatesGroup):
     waiting_inns = State()
 
 
+class BroadcastStates(StatesGroup):
+    waiting_text = State()
+
+
 # Отслеживаем полученные файлы вне FSMContext, под блокировкой — чтобы два
 # параллельных скачивания (покупки+продажи почти одновременно) не перезаписали
 # друг друга при записи состояния (race condition).
 _pending_books: dict[int, dict] = {}
 _pending_lock = asyncio.Lock()
+
+MENU_TEXTS = {"📊 Проверить книгу", "🔍 Проверить контрагента", "📋 Список ИНН", "🔗 Найти связи", "⚙️ Настройки", "ℹ️ Помощь"}
 
 
 @router.message(CommandStart())
@@ -137,25 +143,190 @@ async def cmd_clearcache(message: Message):
     await message.answer(f"Кэш по ИНН {inn} {'очищен' if removed else 'и так был пуст'}.")
 
 
+STATUS_EMOJI = {"paid": "💳", "free_invite": "🎁", "free": "⚪", "blocked": "🚫"}
+STATUS_LABEL_RU = {"paid": "платный", "free_invite": "бесплатный (инвайт)", "free": "бесплатный", "blocked": "заблокирован"}
+
+
+def _admin_main_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👥 Пользователи", callback_data="adm:users:0"),
+         InlineKeyboardButton(text="📊 Статистика", callback_data="adm:stats")],
+        [InlineKeyboardButton(text="📢 Рассылка", callback_data="adm:bcast"),
+         InlineKeyboardButton(text="🔗 Пригласить", callback_data="adm:invite")],
+    ])
+
+
 @router.message(F.text.startswith("/admin"))
 async def cmd_admin(message: Message):
     if message.from_user.id != OWNER_ID:
         return
-    me = await message.bot.get_me()
-    invite_link = f"https://t.me/{me.username}?start=friend"
-    stats = await db.get_stats()
+    await message.answer("<b>🛠 Админ-панель</b>", reply_markup=_admin_main_kb())
 
-    lines = ["<b>🛠 Админ-панель</b>", ""]
+
+@router.callback_query(F.data == "adm:menu")
+async def cb_admin_menu(callback: CallbackQuery):
+    if callback.from_user.id != OWNER_ID:
+        return await callback.answer()
+    await callback.message.edit_text("<b>🛠 Админ-панель</b>", reply_markup=_admin_main_kb())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "adm:stats")
+async def cb_admin_stats(callback: CallbackQuery):
+    if callback.from_user.id != OWNER_ID:
+        return await callback.answer()
+    stats = await db.get_stats()
+    lines = ["<b>📊 Статистика</b>", ""]
     if stats["enabled"]:
-        lines.append(f"👥 Пользователей: {stats['users']}")
-        lines.append(f"📊 Проверок сегодня: {stats['checks_today']} (всего: {stats['checks_total']})")
+        lines.append(f"Всего пользователей: {stats['users']}")
+        lines.append(f"Проверок за сутки: {stats['checks_today']}")
+        lines.append(f"Проверок всего: {stats['checks_total']}")
+        lines.append("")
+        lines.append("<b>По статусам:</b>")
+        for status, count in stats["by_status"].items():
+            lines.append(f"{STATUS_EMOJI.get(status, '•')} {STATUS_LABEL_RU.get(status, status)}: {count}")
     else:
-        lines.append("⚠️ БД не подключена (DATABASE_URL не задан) — статистика недоступна.")
-    lines.append("")
-    lines.append(f"🔗 Пригласить (бесплатный доступ): {invite_link}")
-    lines.append("")
-    lines.append("✅ Заявки на оплату — недоступно (оплата пока не подключена)")
-    await message.answer("\n".join(lines))
+        lines.append("⚠️ БД не подключена.")
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅ Назад", callback_data="adm:menu")]])
+    await callback.message.edit_text("\n".join(lines), reply_markup=kb)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "adm:invite")
+async def cb_admin_invite(callback: CallbackQuery):
+    if callback.from_user.id != OWNER_ID:
+        return await callback.answer()
+    me = await callback.bot.get_me()
+    link = f"https://t.me/{me.username}?start=friend"
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅ Назад", callback_data="adm:menu")]])
+    await callback.message.edit_text(
+        f"<b>🔗 Пригласить</b>\n\nПереход по этой ссылке даёт бесплатный доступ навсегда:\n{link}",
+        reply_markup=kb,
+    )
+    await callback.answer()
+
+
+USERS_PAGE_SIZE = 8
+
+
+@router.callback_query(F.data.startswith("adm:users:"))
+async def cb_admin_users(callback: CallbackQuery):
+    if callback.from_user.id != OWNER_ID:
+        return await callback.answer()
+    offset = int(callback.data.split(":")[2])
+    users = await db.list_users(limit=USERS_PAGE_SIZE, offset=offset)
+
+    rows = []
+    for u in users:
+        label = f"{STATUS_EMOJI.get(u.status, '•')} {u.username or u.telegram_id}"
+        rows.append([InlineKeyboardButton(text=label, callback_data=f"adm:user:{u.telegram_id}")])
+
+    nav = []
+    if offset > 0:
+        nav.append(InlineKeyboardButton(text="⬅ Пред.", callback_data=f"adm:users:{max(0, offset - USERS_PAGE_SIZE)}"))
+    if len(users) == USERS_PAGE_SIZE:
+        nav.append(InlineKeyboardButton(text="След. ➡", callback_data=f"adm:users:{offset + USERS_PAGE_SIZE}"))
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton(text="⬅ В меню", callback_data="adm:menu")])
+
+    total = await db.count_users()
+    text = f"<b>👥 Пользователи</b> ({total} всего)\n\nВыберите пользователя для управления:"
+    if not users:
+        text = "<b>👥 Пользователи</b>\n\nПока никого нет."
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm:user:"))
+async def cb_admin_user_detail(callback: CallbackQuery):
+    if callback.from_user.id != OWNER_ID:
+        return await callback.answer()
+    target_id = int(callback.data.split(":")[2])
+    user = await db.get_user(target_id)
+    if not user:
+        return await callback.answer("Пользователь не найден", show_alert=True)
+
+    lines = [
+        f"<b>{user.username or '(без username)'}</b>",
+        f"ID: <code>{user.telegram_id}</code>",
+        f"Статус: {STATUS_EMOJI.get(user.status, '•')} {STATUS_LABEL_RU.get(user.status, user.status)}",
+    ]
+    if user.paid_until:
+        lines.append(f"Оплачено до: {user.paid_until.strftime('%d.%m.%Y')}")
+    lines.append(f"Первый визит: {user.first_seen.strftime('%d.%m.%Y')}")
+    if user.invited_by:
+        lines.append(f"Приглашён: {user.invited_by}")
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ +30 дней", callback_data=f"adm:appr:{target_id}:30"),
+         InlineKeyboardButton(text="✅ +90 дней", callback_data=f"adm:appr:{target_id}:90"),
+         InlineKeyboardButton(text="✅ +365", callback_data=f"adm:appr:{target_id}:365")],
+        [InlineKeyboardButton(text="🚫 Отозвать доступ", callback_data=f"adm:revoke:{target_id}")],
+        [InlineKeyboardButton(text="⬅ К списку", callback_data="adm:users:0")],
+    ])
+    await callback.message.edit_text("\n".join(lines), reply_markup=kb)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm:appr:"))
+async def cb_admin_approve(callback: CallbackQuery):
+    if callback.from_user.id != OWNER_ID:
+        return await callback.answer()
+    _, _, target_id_str, days_str = callback.data.split(":")
+    target_id, days = int(target_id_str), int(days_str)
+    new_until = await db.extend_paid(target_id, days)
+    try:
+        await callback.bot.send_message(
+            target_id,
+            f"✅ Ваш платный доступ продлён до {new_until.strftime('%d.%m.%Y')}.",
+        )
+    except Exception:
+        logging.exception("Не удалось уведомить пользователя %s о продлении", target_id)
+    await callback.answer(f"Продлено до {new_until.strftime('%d.%m.%Y')}", show_alert=True)
+    await cb_admin_user_detail(callback)
+
+
+@router.callback_query(F.data.startswith("adm:revoke:"))
+async def cb_admin_revoke(callback: CallbackQuery):
+    if callback.from_user.id != OWNER_ID:
+        return await callback.answer()
+    target_id = int(callback.data.split(":")[2])
+    await db.set_user_status(target_id, "free", None)
+    try:
+        await callback.bot.send_message(target_id, "⚠️ Ваш платный доступ был отозван.")
+    except Exception:
+        logging.exception("Не удалось уведомить пользователя %s об отзыве", target_id)
+    await callback.answer("Доступ отозван", show_alert=True)
+    await cb_admin_user_detail(callback)
+
+
+@router.callback_query(F.data == "adm:bcast")
+async def cb_admin_broadcast_start(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id != OWNER_ID:
+        return await callback.answer()
+    await state.clear()
+    await state.set_state(BroadcastStates.waiting_text)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅ Отмена", callback_data="adm:menu")]])
+    await callback.message.edit_text("<b>📢 Рассылка</b>\n\nПришлите текст следующим сообщением — разошлю его всем пользователям.", reply_markup=kb)
+    await callback.answer()
+
+
+@router.message(BroadcastStates.waiting_text, F.text, ~F.text.startswith("/"), ~F.text.in_(MENU_TEXTS))
+async def receive_broadcast_text(message: Message, state: FSMContext):
+    if message.from_user.id != OWNER_ID:
+        return
+    text = message.text
+    users = await db.list_users(limit=10_000)
+    sent, failed = 0, 0
+    for u in users:
+        try:
+            await message.bot.send_message(u.telegram_id, text)
+            sent += 1
+        except Exception:
+            failed += 1
+    await message.answer(f"Рассылка завершена: доставлено {sent}, не удалось {failed}.", reply_markup=main_menu)
+    await state.clear()
 
 
 @router.message(F.text == "📊 Проверить книгу")
@@ -268,7 +439,7 @@ async def start_counterparty_check(message: Message, state: FSMContext):
     await message.answer("Введите ИНН организации или ИП (10 или 12 цифр).")
 
 
-MENU_TEXTS = {"📊 Проверить книгу", "🔍 Проверить контрагента", "📋 Список ИНН", "🔗 Найти связи", "⚙️ Настройки", "ℹ️ Помощь"}
+
 
 
 @router.message(CardStates.waiting_inn, F.text, ~F.text.startswith("/"), ~F.text.in_(MENU_TEXTS))
