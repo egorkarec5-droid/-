@@ -15,7 +15,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.enums import TA_LEFT, TA_CENTER
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable, PageBreak
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
@@ -84,42 +84,74 @@ def _split_paragraphs(text: str) -> list[str]:
     return result
 
 
+_STYLES_READY = None
+
+
+def _styles():
+    global _STYLES_READY
+    if _STYLES_READY is None:
+        _STYLES_READY = {
+            "title": ParagraphStyle("title", fontName="DejaVuSans-Bold", fontSize=16, leading=20, alignment=TA_LEFT),
+            "subtitle": ParagraphStyle("subtitle", fontName="DejaVuSans", fontSize=9, leading=12, textColor="#666666"),
+            "body": ParagraphStyle("body", fontName="DejaVuSans", fontSize=9.5, leading=13.5, alignment=TA_LEFT, spaceAfter=6),
+            "footer": ParagraphStyle("footer", fontName="DejaVuSans", fontSize=7.5, leading=10, textColor="#888888", alignment=TA_CENTER),
+        }
+    return _STYLES_READY
+
+
+_FOOTER_TEXT = (
+    "Это НЕ официальная выписка из ЕГРЮЛ и не документ с электронной подписью ФНС — "
+    "собственное досье на основе открытых данных DaData/Checko, не является юридическим заключением."
+)
+
+
+def _section_elements(title: str, subtitle: str, body_text: str) -> list:
+    s = _styles()
+    elements = [
+        Paragraph("Досье Плюс — досье контрагента", s["subtitle"]),
+        Paragraph(title, s["title"]),
+        Paragraph(subtitle, s["subtitle"]),
+        Spacer(1, 6),
+        HRFlowable(width="100%", color="#CCCCCC", thickness=0.7),
+        Spacer(1, 8),
+    ]
+    for block in _telegram_html_to_reportlab(body_text):
+        elements.append(Paragraph(block, s["body"]))
+    elements.append(Spacer(1, 10))
+    elements.append(HRFlowable(width="100%", color="#CCCCCC", thickness=0.7))
+    elements.append(Spacer(1, 6))
+    elements.append(Paragraph(_FOOTER_TEXT, s["footer"]))
+    return elements
+
+
 def build_dossier_pdf(title: str, subtitle: str, body_text: str) -> bytes:
     _ensure_fonts()
-
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
         buf, pagesize=A4,
         topMargin=16 * mm, bottomMargin=16 * mm, leftMargin=18 * mm, rightMargin=18 * mm,
         title=title,
     )
+    doc.build(_section_elements(title, subtitle, body_text))
+    buf.seek(0)
+    return buf.read()
 
-    title_style = ParagraphStyle("title", fontName="DejaVuSans-Bold", fontSize=16, leading=20, alignment=TA_LEFT)
-    subtitle_style = ParagraphStyle("subtitle", fontName="DejaVuSans", fontSize=9, leading=12, textColor="#666666")
-    body_style = ParagraphStyle("body", fontName="DejaVuSans", fontSize=9.5, leading=13.5, alignment=TA_LEFT, spaceAfter=6)
-    footer_style = ParagraphStyle("footer", fontName="DejaVuSans", fontSize=7.5, leading=10, textColor="#888888", alignment=TA_CENTER)
 
-    elements = [
-        Paragraph("Досье Плюс — досье контрагента", subtitle_style),
-        Paragraph(title, title_style),
-        Paragraph(subtitle, subtitle_style),
-        Spacer(1, 6),
-        HRFlowable(width="100%", color="#CCCCCC", thickness=0.7),
-        Spacer(1, 8),
-    ]
-
-    for block in _telegram_html_to_reportlab(body_text):
-        elements.append(Paragraph(block, body_style))
-
-    elements.append(Spacer(1, 10))
-    elements.append(HRFlowable(width="100%", color="#CCCCCC", thickness=0.7))
-    elements.append(Spacer(1, 6))
-    elements.append(Paragraph(
-        "Это НЕ официальная выписка из ЕГРЮЛ и не документ с электронной подписью ФНС — "
-        "собственное досье на основе открытых данных DaData/Checko, не является юридическим заключением.",
-        footer_style,
-    ))
-
+def build_multi_dossier_pdf(sections: list[tuple[str, str, str]]) -> bytes:
+    """Одна PDF-книжка на несколько компаний сразу — каждая начинается с новой
+    страницы. sections — список (title, subtitle, body_text) на компанию."""
+    _ensure_fonts()
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=A4,
+        topMargin=16 * mm, bottomMargin=16 * mm, leftMargin=18 * mm, rightMargin=18 * mm,
+        title="Досье Плюс — сводное досье",
+    )
+    elements = []
+    for i, (title, subtitle, body_text) in enumerate(sections):
+        if i > 0:
+            elements.append(PageBreak())
+        elements.extend(_section_elements(title, subtitle, body_text))
     doc.build(elements)
     buf.seek(0)
     return buf.read()
