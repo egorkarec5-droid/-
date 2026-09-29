@@ -27,7 +27,8 @@ from card import (
 )
 from links import inn_link, set_bot_username, strip_inn_links
 from schemes import render_money_flow, FlowRow, render_relations, RelationRow, render_connections_graph
-from pdf_export import build_dossier_pdf, build_multi_dossier_pdf
+from pdf_export import build_dossier_pdf, build_multi_dossier_pdf, render_card_pdf, render_multi_card_pdf
+from pdf_model import build_pdf_model
 from relations_search import find_connections, enrich_person_links, graph_edges, company_name
 import db
 from dadata_client import get_party, DaDataError
@@ -580,24 +581,31 @@ async def start_counterparty_check(message: Message, state: FSMContext):
 
 # ───────── кэш карточки: текст + раскрываемые секции + данные схемы связей ─────────
 
-def _pack_cache(text: str, exp: list, scheme: dict | None) -> str:
-    return json.dumps({"v": 2, "text": text, "exp": exp, "scheme": scheme}, ensure_ascii=False)
+def _pack_cache(text: str, exp: list, scheme: dict | None, pdf_model: dict | None = None) -> str:
+    return json.dumps({"v": 3, "text": text, "exp": exp, "scheme": scheme, "pdf": pdf_model}, ensure_ascii=False)
 
 
-def _unpack_cache(raw: str) -> tuple[str, list, dict | None]:
+def _unpack_cache(raw: str) -> tuple[str, list, dict | None, dict | None]:
+    """(текст карточки, кнопки «показать все», данные схемы связей, модель PDF).
+    Старые записи кэша (v2 и просто текст) читаются без модели PDF — для них PDF строится из текста."""
     try:
         data = json.loads(raw)
-        if isinstance(data, dict) and data.get("v") == 2:
-            return data["text"], [tuple(x) for x in data.get("exp", [])], data.get("scheme")
+        if isinstance(data, dict) and data.get("v") in (2, 3):
+            return data["text"], [tuple(x) for x in data.get("exp", [])], data.get("scheme"), data.get("pdf")
     except (ValueError, TypeError):
         pass
-    return raw, [], None   # старый формат кэша — просто текст
+    return raw, [], None, None
 
 
 def _cache_payload(result, text: str) -> str:
     center, rows = relation_scheme_data(result)
     scheme = {"center": center, "rows": rows} if rows else None
-    return _pack_cache(text, expandable_sections(result), scheme)
+    try:
+        model = build_pdf_model(result)
+    except Exception:
+        logging.exception("Не удалось построить модель PDF для ИНН %s", getattr(result, "inn", "?"))
+        model = None
+    return _pack_cache(text, expandable_sections(result), scheme, model)
 
 
 def _more_kb(exp: list, inn: str) -> InlineKeyboardMarkup | None:
@@ -617,10 +625,11 @@ async def process_inn(message: Message, inn: str):
     cached = await db.get_cached_card(inn)
     exp: list = []
     scheme: dict | None = None
+    pdf_model: dict | None = None
     from_cache = False
 
     if cached:
-        body, exp, scheme = _unpack_cache(cached)
+        body, exp, scheme, pdf_model = _unpack_cache(cached)
         from_cache = True
     else:
         await message.answer("⏳ Ищу данные...")
@@ -628,7 +637,7 @@ async def process_inn(message: Message, inn: str):
             result = await build_card(inn, DADATA_API_KEY, DADATA_SECRET_KEY, CHECKO_API_KEY)
             body = format_card(result)
             payload = _cache_payload(result, body)
-            _, exp, scheme = _unpack_cache(payload)
+            _, exp, scheme, pdf_model = _unpack_cache(payload)
             await db.set_cached_card(inn, payload)
         except Exception as e:
             logging.exception("Ошибка при построении карточки по ИНН %s", inn)
@@ -646,7 +655,10 @@ async def process_inn(message: Message, inn: str):
     title_match = re.search(r"<b>(.*?)</b>", body)
     pdf_title = title_match.group(1) if title_match else inn
     try:
-        pdf_bytes = build_dossier_pdf(pdf_title, f"ИНН {inn} · сформировано ботом Досье Плюс", strip_inn_links(body))
+        if pdf_model:
+            pdf_bytes = render_card_pdf(pdf_model)
+        else:
+            pdf_bytes = build_dossier_pdf(pdf_title, f"ИНН {inn} · сформировано ботом Досье Плюс", strip_inn_links(body))
         await message.answer_document(
             BufferedInputFile(pdf_bytes, filename=f"Досье_{inn}.pdf"),
             caption="📥 PDF-досье (не официальная выписка из ЕГРЮЛ)",
@@ -760,6 +772,7 @@ async def receive_inn_list(message: Message, state: FSMContext):
 
     await message.answer(f"⏳ Проверяю {len(inns)} ИНН, соберу один PDF на все компании сразу...")
 
+    models: list[dict] = []
     sections = []
     summary_lines = []
     for inn in inns:
@@ -785,12 +798,20 @@ async def receive_inn_list(message: Message, state: FSMContext):
         summary_lines.append(f"{emoji} {name} (ИНН {inn})")
 
         sections.append((name, f"ИНН {inn} · сформировано ботом Досье Плюс", strip_inn_links(text)))
+        try:
+            models.append(build_pdf_model(result))
+        except Exception:
+            logging.exception("Не удалось построить модель PDF для ИНН %s", inn)
 
     await message.answer("\n".join(summary_lines) or "Ничего не найдено.")
 
     if sections:
         try:
-            pdf_bytes = build_multi_dossier_pdf(sections)
+            # красивое сводное досье из моделей; если хоть одну модель построить не удалось — текстовый вариант
+            if models and len(models) == len(sections):
+                pdf_bytes = render_multi_card_pdf(models)
+            else:
+                pdf_bytes = build_multi_dossier_pdf(sections)
             await message.answer_document(
                 BufferedInputFile(pdf_bytes, filename=f"Досье_список_{len(sections)}_компаний.pdf"),
                 caption=f"📥 Сводное PDF-досье — {len(sections)} компаний (каждая с новой страницы)",
