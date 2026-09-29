@@ -413,10 +413,16 @@ async def get_contracts(inn: str, api_key: str, law: str = "44", role: str | Non
     return contracts
 
 
-def _parse_related_orgs(records: list) -> list[dict]:
+def _parse_related_orgs(records: list, kind: str = "") -> list[dict]:
     return [
-        {"inn": r.get("ИНН", ""), "name": r.get("НаимСокр", "") or r.get("НаимПолн", ""), "status": r.get("Статус", "")}
+        {
+            "inn": r.get("ИНН", ""),
+            "name": r.get("НаимСокр", "") or r.get("НаимПолн", ""),
+            "status": r.get("Статус", ""),
+            "kind": kind,
+        }
         for r in (records or [])
+        if isinstance(r, dict)
     ]
 
 
@@ -490,8 +496,8 @@ async def get_entrepreneur(inn: str, api_key: str) -> Entrepreneur | None:
             {"id": t.get("ID"), "url": t.get("URL", ""), "date": t.get("ДатаРег", ""), "expires": t.get("ДатаОконч", "")}
             for t in (data.get("ТоварЗнак") or [])
         ],
-        managed_orgs=_parse_related_orgs(data.get("СвязРуковод")),
-        founded_orgs=_parse_related_orgs(data.get("СвязУчред")),
+        managed_orgs=_parse_related_orgs(data.get("СвязРуковод"), "руководитель"),
+        founded_orgs=_parse_related_orgs(data.get("СвязУчред"), "учредитель"),
         unfair_supplier=bool(data.get("НедобПост")),
         mass_director=bool(data.get("МассРуковод")),
         mass_founder=bool(data.get("МассУчред")),
@@ -543,8 +549,8 @@ async def get_person(inn: str, api_key: str) -> Person | None:
     return Person(
         inn=data.get("ИНН", ""),
         fio=data.get("ФИО", ""),
-        managed_orgs=_parse_related_orgs(data.get("Руковод")),
-        founded_orgs=_parse_related_orgs(data.get("Учред")),
+        managed_orgs=_parse_related_orgs(data.get("Руковод"), "руководитель"),
+        founded_orgs=_parse_related_orgs(data.get("Учред"), "учредитель"),
         ip_records=[
             {"ogrnip": i.get("ОГРНИП", ""), "status": i.get("Статус", ""), "reg_date": i.get("ДатаРег", "")}
             for i in (data.get("ИП") or [])
@@ -695,10 +701,12 @@ def _parse_company(data: dict) -> CheckoCompany:
         if "добавленную стоимость" in (item.get("Наим") or ""):
             vat_paid = _to_float(item.get("Сумма"))
             break
-    related_orgs = [
-        {"inn": r.get("ИНН", ""), "name": r.get("НаимСокр", ""), "status": r.get("Статус", "")}
-        for r in (data.get("СвязУчред") or [])
-    ]
+    # тип связи определяется тем, из какого поля Checko она пришла
+    related_orgs = (
+        _parse_related_orgs(data.get("СвязУчред"), "общий учредитель")
+        + _parse_related_orgs(data.get("СвязРуковод"), "общий руководитель")
+        + _parse_related_orgs(data.get("СвязУпрОрг"), "общая упр. организация")
+    )
 
     managing_org = None
     if upr_org_raw:
