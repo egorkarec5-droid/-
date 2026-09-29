@@ -21,10 +21,14 @@ from book_detect import detect_book_type
 from parser import parse_pokupki, parse_prodazhi, summarize, ParseError
 from rules import assess_all
 from report import format_summary_line, format_top_risks, DISCLAIMER
-from card import build_card, format_card, split_for_telegram
-from schemes import render_money_flow, FlowRow, render_relations, RelationRow
+from card import (
+    build_card, format_card, split_for_telegram, chunk_lines,
+    expandable_sections, fetch_and_format_section, relation_scheme_data, build_light_card,
+)
+from links import inn_link, set_bot_username, strip_inn_links
+from schemes import render_money_flow, FlowRow, render_relations, RelationRow, render_connections_graph
 from pdf_export import build_dossier_pdf, build_multi_dossier_pdf
-from relations_search import find_connections
+from relations_search import find_connections, enrich_person_links, graph_edges, company_name
 import db
 from dadata_client import get_party, DaDataError
 from checko_client import get_company, get_finances, get_reliability, get_entrepreneur, get_person, search_by_name, CheckoError
@@ -65,11 +69,17 @@ WELCOME = (
     "Проверяю компании, ИП и самозанятых на признаки риска: подставные фирмы, "
     "номинальных директоров, подозрительные платежи, скрытые связи между организациями.\n\n"
     "<b>Что я умею:</b>\n"
-    "📊 Разобрать книгу покупок/продаж — найду подозрительные операции и схему платежей\n"
-    "🔍 Дать полную карточку по ИНН — ЕГРЮЛ, финансы, ФССП, арбитраж, госконтракты, официальная оценка надёжности Checko\n"
-    "📋 Проверить сразу до 20 ИНН — одним PDF-файлом\n"
-    "🔗 Найти связи между несколькими организациями — общий директор/учредитель/адрес/телефон/контракт\n\n"
-    "Все действия — кнопками ниже, ничего не нужно печатать вручную.\n\n"
+    "📊 Разобрать книгу покупок/продаж (Раздел 8/9 декларации по НДС) — найду подозрительные операции, "
+    "пришлю схему платежей и PDF-отчёт\n"
+    "🔍 Дать полную карточку по ИНН или названию — ЕГРЮЛ/ЕГРИП, руководитель и учредители (в т.ч. бывшие), "
+    "финансы за несколько лет, налоги, статус самозанятого, ФССП, арбитраж, проверки прокуратуры, "
+    "госконтракты, официальная оценка надёжности Checko + собственная аналитика бота\n"
+    "📋 Проверить сразу до 20 ИНН — одним PDF со всеми компаниями\n"
+    "🔗 Найти связи между 2-10 организациями — общий директор/учредитель/адрес/телефон/e-mail/госконтракт\n\n"
+    "После карточки/схемы бот сам присылает PDF-досье — сохранять и пересылать отдельно не нужно.\n\n"
+    "Данные — DaData, Checko (ЕГРЮЛ, финансы, риски, госзакупки) и ФНС (самозанятость). "
+    "Все действия — кнопками ниже, печатать команды не нужно.\n\n"
+    "ℹ️ Подробнее о каждой функции — кнопка «Помощь».\n\n"
     "⚠️ Оценка риска — автоматическая, по открытым данным, не является юридическим заключением."
 )
 
@@ -130,9 +140,19 @@ def menu_for(user_id: int) -> "ReplyKeyboardMarkup":
 
 
 @router.message(CommandStart())
-async def cmd_start(message: Message, command: CommandObject | None = None):
+async def cmd_start(message: Message, state: FSMContext, command: CommandObject | None = None):
+    args = (command.args or "") if command else ""
+
+    # нажатие на кликабельный ИНН в любом сообщении бота: t.me/<бот>?start=inn_<ИНН>
+    if args.startswith("inn_") and _is_valid_inn(args[4:]):
+        await db.upsert_user(message.from_user.id, message.from_user.username, None)
+        await state.clear()
+        await state.set_state(CardStates.waiting_inn)   # чтобы дальше можно было вводить ИНН подряд
+        await process_inn(message, args[4:])
+        return
+
     invited_by = None
-    if command and INVITE_CODE and command.args == INVITE_CODE:
+    if INVITE_CODE and args == INVITE_CODE:
         invited_by = OWNER_ID
     await db.upsert_user(message.from_user.id, message.from_user.username, invited_by)
     await message.answer(WELCOME, reply_markup=menu_for(message.from_user.id))
@@ -425,18 +445,48 @@ async def receive_book_file(message: Message, state: FSMContext):
         await run_analysis(message, state, slot["purchases"], slot["sales"])
         async with _pending_lock:
             _pending_books.pop(user_id, None)
+    else:
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text=f"✅ Хватит, у меня только книга {label}", callback_data="book:only_one"),
+        ]])
+        await message.answer(
+            f"Жду книгу {other_label} — либо нажмите кнопку ниже, если второй книги нет "
+            f"и нужно проверить только эту.",
+            reply_markup=kb,
+        )
 
 
-async def run_analysis(message: Message, state: FSMContext, purchases_path: str, sales_path: str):
+@router.callback_query(F.data == "book:only_one")
+async def cb_book_only_one(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    async with _pending_lock:
+        slot = _pending_books.pop(user_id, {})
+    if not slot:
+        await callback.answer("Файл уже не актуален, пришлите книгу заново.", show_alert=True)
+        return
+    await callback.answer()
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await run_analysis(callback.message, state, slot.get("purchases"), slot.get("sales"), user_id=user_id)
+
+
+async def run_analysis(message: Message, state: FSMContext, purchases_path: str | None, sales_path: str | None, user_id: int | None = None):
+    user_id = user_id or message.from_user.id
     await message.answer("⏳ Обрабатываю, это займёт несколько секунд...")
 
     try:
-        pokupki = parse_pokupki(purchases_path)
-        prodazhi = parse_prodazhi(sales_path)
+        pokupki = parse_pokupki(purchases_path) if purchases_path else []
+        prodazhi = parse_prodazhi(sales_path) if sales_path else []
     except ParseError as e:
         await message.answer(f"❌ Не смог разобрать файл: {e}")
         await state.clear()
         return
+
+    if not purchases_path or not sales_path:
+        missing = "покупок" if not purchases_path else "продаж"
+        await message.answer(f"⚠️ Книги {missing} не было — анализирую только по тому, что есть. Часть проверок (например, транзитные операции) при этом недоступна.")
 
     all_ops = pokupki + prodazhi
     summaries = summarize(all_ops)
@@ -444,8 +494,8 @@ async def run_analysis(message: Message, state: FSMContext, purchases_path: str,
 
     summary_line = format_summary_line(assessments)
     await message.answer(summary_line)
-    await message.answer(format_top_risks(summaries, assessments) + DISCLAIMER, reply_markup=menu_for(message.from_user.id))
-    await db.log_check(message.from_user.id, "book", None, summary_line)
+    await message.answer(format_top_risks(summaries, assessments) + DISCLAIMER, reply_markup=menu_for(user_id))
+    await db.log_check(user_id, "book", None, summary_line)
 
     ranked = sorted(assessments.items(), key=lambda kv: kv[1].score, reverse=True)
     top_for_scheme = [(inn, a) for inn, a in ranked if a.level in ("high", "medium")][:6]
@@ -493,9 +543,9 @@ async def run_analysis(message: Message, state: FSMContext, purchases_path: str,
 
             status_str = ", ".join(marks) if marks else "явных внешних рисков не найдено"
             external_lines.append(f"\n• <b>{summaries[inn].name}</b> (ИНН {inn}) — {status_str}")
-            await db.log_check(message.from_user.id, "counterparty", inn, f"{summaries[inn].name} — из книги")
+            await db.log_check(user_id, "counterparty", inn, f"{summaries[inn].name} — из книги")
 
-        await message.answer("\n".join(external_lines), reply_markup=menu_for(message.from_user.id))
+        await message.answer("\n".join(external_lines), reply_markup=menu_for(user_id))
 
     try:
         report_text = (
@@ -528,6 +578,128 @@ async def start_counterparty_check(message: Message, state: FSMContext):
 
 
 
+# ───────── кэш карточки: текст + раскрываемые секции + данные схемы связей ─────────
+
+def _pack_cache(text: str, exp: list, scheme: dict | None) -> str:
+    return json.dumps({"v": 2, "text": text, "exp": exp, "scheme": scheme}, ensure_ascii=False)
+
+
+def _unpack_cache(raw: str) -> tuple[str, list, dict | None]:
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict) and data.get("v") == 2:
+            return data["text"], [tuple(x) for x in data.get("exp", [])], data.get("scheme")
+    except (ValueError, TypeError):
+        pass
+    return raw, [], None   # старый формат кэша — просто текст
+
+
+def _cache_payload(result, text: str) -> str:
+    center, rows = relation_scheme_data(result)
+    scheme = {"center": center, "rows": rows} if rows else None
+    return _pack_cache(text, expandable_sections(result), scheme)
+
+
+def _more_kb(exp: list, inn: str) -> InlineKeyboardMarkup | None:
+    """Кнопки «➕ Показать все …» под карточкой — по одной на каждый обрезанный список."""
+    if not exp:
+        return None
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=label, callback_data=f"more:{key}:{inn}")] for key, label in exp
+    ])
+
+
+async def process_inn(message: Message, inn: str):
+    """Полная проверка одного ИНН: карточка с кликабельными ИНН, кнопки «Показать все»,
+    PDF-досье и схема связей с подписями. Общий код для ввода ИНН вручную и для нажатия
+    на ИНН-ссылку в любом сообщении бота."""
+    user_id = message.from_user.id
+    cached = await db.get_cached_card(inn)
+    exp: list = []
+    scheme: dict | None = None
+    from_cache = False
+
+    if cached:
+        body, exp, scheme = _unpack_cache(cached)
+        from_cache = True
+    else:
+        await message.answer("⏳ Ищу данные...")
+        try:
+            result = await build_card(inn, DADATA_API_KEY, DADATA_SECRET_KEY, CHECKO_API_KEY)
+            body = format_card(result)
+            payload = _cache_payload(result, body)
+            _, exp, scheme = _unpack_cache(payload)
+            await db.set_cached_card(inn, payload)
+        except Exception as e:
+            logging.exception("Ошибка при построении карточки по ИНН %s", inn)
+            body = f"❌ Не удалось получить данные по ИНН {inn}: {e}\nПопробуйте ещё раз или другой ИНН."
+
+    shown = body + ("\n\n<i>(из кэша, обновлено в течение суток)</i>" if from_cache else "")
+
+    await db.log_check(user_id, "counterparty", inn, body.split("\n")[0][:200])
+    kb = _more_kb(exp, inn)
+    chunks = split_for_telegram(shown)
+    for i, chunk in enumerate(chunks):
+        is_last = i == len(chunks) - 1
+        await message.answer(chunk, reply_markup=kb if (is_last and kb) else None)
+
+    title_match = re.search(r"<b>(.*?)</b>", body)
+    pdf_title = title_match.group(1) if title_match else inn
+    try:
+        pdf_bytes = build_dossier_pdf(pdf_title, f"ИНН {inn} · сформировано ботом Досье Плюс", strip_inn_links(body))
+        await message.answer_document(
+            BufferedInputFile(pdf_bytes, filename=f"Досье_{inn}.pdf"),
+            caption="📥 PDF-досье (не официальная выписка из ЕГРЮЛ)",
+        )
+    except Exception:
+        logging.exception("Ошибка при генерации PDF для ИНН %s", inn)
+
+    if scheme and scheme.get("rows"):
+        try:
+            rows_all = scheme["rows"]
+            rel_rows = [
+                RelationRow(name=r["name"], inn=r["inn"], active=r["active"], label=r.get("label", ""))
+                for r in rows_all[:6]
+            ]
+            png = render_relations(scheme["center"], rel_rows)
+            caption = "🔗 Схема связей — на линиях подписано, чем связаны организации"
+            if len(rows_all) > 6:
+                caption += f" (показаны 6 из {len(rows_all)})"
+            await message.answer_photo(BufferedInputFile(png, filename="relations.png"), caption=caption)
+        except Exception:
+            logging.exception("Ошибка при рендере схемы связей")
+
+    await message.answer("Введите следующий ИНН или название, нажмите на любой ИНН в сообщении выше, или выберите другое действие кнопкой ниже.")
+    # состояние остаётся waiting_inn — можно проверять несколько ИНН подряд
+
+
+@router.callback_query(F.data.startswith("more:"))
+async def cb_more(callback: CallbackQuery):
+    """«➕ Показать все …» — присылаем секцию карточки ПОЛНОСТЬЮ (в карточке она была обрезана)."""
+    _, key, inn = callback.data.split(":", 2)
+    await callback.answer("Загружаю полный список…")
+    try:
+        text = await fetch_and_format_section(key, inn, CHECKO_API_KEY)
+    except Exception:
+        logging.exception("Ошибка при разворачивании секции %s для ИНН %s", key, inn)
+        await callback.message.answer("❌ Не удалось загрузить полный список, попробуйте ещё раз позже.")
+        return
+
+    # кнопка нажата — убираем её из клавиатуры, остальные оставляем
+    try:
+        markup = callback.message.reply_markup
+        if markup:
+            remaining = [row for row in markup.inline_keyboard if row[0].callback_data != callback.data]
+            await callback.message.edit_reply_markup(
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=remaining) if remaining else None
+            )
+    except Exception:
+        pass
+
+    for chunk in chunk_lines(text, 3500):
+        await callback.message.answer(chunk)
+
+
 @router.message(CardStates.waiting_inn, F.text, ~F.text.startswith("/"), ~F.text.in_(MENU_TEXTS))
 async def receive_inn(message: Message, state: FSMContext):
     query = message.text.strip()
@@ -550,64 +722,15 @@ async def receive_inn(message: Message, state: FSMContext):
         if len(hits) == 1:
             inn = hits[0].inn
         else:
-            lines = ["Нашёл несколько совпадений — пришлите ИНН нужной организации:\n"]
+            lines = ["Нашёл несколько совпадений — <b>нажмите на ИНН</b> нужной организации:\n"]
             for h in hits:
-                lines.append(f"{h.name_short} — ИНН {h.inn}, {h.status}, {h.address}")
+                lines.append(f"{h.name_short} — ИНН {inn_link(h.inn)}, {h.status}, {h.address}")
             await message.answer("\n".join(lines))
             return
     else:
         inn = query
 
-    cached = await db.get_cached_card(inn)
-    result = None
-    if cached:
-        text = cached + "\n\n<i>(из кэша, обновлено в течение суток)</i>"
-    else:
-        await message.answer("⏳ Ищу данные...")
-        try:
-            result = await build_card(inn, DADATA_API_KEY, DADATA_SECRET_KEY, CHECKO_API_KEY)
-            text = format_card(result)
-            await db.set_cached_card(inn, text)
-        except Exception as e:
-            logging.exception("Ошибка при построении карточки по ИНН %s", inn)
-            text = f"❌ Не удалось получить данные по ИНН {inn}: {e}\nПопробуйте ещё раз или другой ИНН."
-
-    await db.log_check(message.from_user.id, "counterparty", inn, text.split("\n")[0][:200])
-    chunks = split_for_telegram(text)
-    for i, chunk in enumerate(chunks):
-        is_last = i == len(chunks) - 1
-        await message.answer(chunk, reply_markup=menu_for(message.from_user.id) if is_last else None)
-
-    title_match = re.search(r"<b>(.*?)</b>", text)
-    pdf_title = title_match.group(1) if title_match else inn
-    try:
-        pdf_bytes = build_dossier_pdf(pdf_title, f"ИНН {inn} · сформировано ботом Досье Плюс", text)
-        await message.answer_document(
-            BufferedInputFile(pdf_bytes, filename=f"Досье_{inn}.pdf"),
-            caption="📥 PDF-досье (не официальная выписка из ЕГРЮЛ)",
-        )
-    except Exception:
-        logging.exception("Ошибка при генерации PDF для ИНН %s", inn)
-
-    if result and result.checko and result.checko.related_orgs:
-        try:
-            rel_rows = [
-                RelationRow(
-                    name=r.get("name") or "—",
-                    inn=r.get("inn") or "—",
-                    active="не действ" not in (r.get("status") or "").lower(),
-                )
-                for r in result.checko.related_orgs[:6]
-            ]
-            center_name = (result.dadata.name_short if result.dadata else None) or result.checko.name_short or inn
-            png = render_relations(center_name, rel_rows)
-            await message.answer_photo(BufferedInputFile(png, filename="relations.png"), caption="🔗 Схема связей")
-        except Exception:
-            logging.exception("Ошибка при рендере схемы связей")
-
-    await message.answer("Введите следующий ИНН или название, или выберите другое действие кнопкой ниже.")
-    # состояние остаётся waiting_inn — можно проверять несколько ИНН подряд
-    # без повторного нажатия кнопки; любая другая кнопка меню сбросит его сама
+    await process_inn(message, inn)
 
 
 MAX_LIST_SIZE = 20
@@ -652,7 +775,7 @@ async def receive_inn_list(message: Message, state: FSMContext):
             continue
 
         text = format_card(result)
-        await db.set_cached_card(inn, text)
+        await db.set_cached_card(inn, _cache_payload(result, text))
         await db.log_check(message.from_user.id, "counterparty", inn, text.split("\n")[0][:200])
 
         name = (result.dadata.name_short if result.dadata else None) or (result.checko.name_short if result.checko else inn)
@@ -661,7 +784,7 @@ async def receive_inn_list(message: Message, state: FSMContext):
         emoji = {"low": "🟢", "medium": "🟡", "high": "🔴"}[worst]
         summary_lines.append(f"{emoji} {name} (ИНН {inn})")
 
-        sections.append((name, f"ИНН {inn} · сформировано ботом Досье Плюс", text))
+        sections.append((name, f"ИНН {inn} · сформировано ботом Досье Плюс", strip_inn_links(text)))
 
     await message.answer("\n".join(summary_lines) or "Ничего не найдено.")
 
@@ -691,8 +814,9 @@ async def start_relations_search(message: Message, state: FSMContext):
     await state.set_state(RelationsSearchStates.waiting_inns)
     await message.answer(
         f"Пришлите от 2 до {MAX_RELATIONS_SIZE} ИНН — каждый на новой строке, через запятую или пробел. "
-        f"Проверю их между собой: общий директор/учредитель (в т.ч. бывшие), общий адрес, "
-        f"совпадающий телефон/e-mail, известные связи по данным Checko."
+        f"Сверю их между собой: общий директор/учредитель (в любой роли, в т.ч. ИП), общий адрес, "
+        f"телефон/e-mail, госконтракты, известные связи по данным Checko — и отдельно проверю, "
+        f"не связаны ли они через каких-то людей, которых нет в текущем списке."
     )
 
 
@@ -710,11 +834,12 @@ async def receive_relations_inns(message: Message, state: FSMContext):
 
     await message.answer(f"⏳ Собираю данные по {len(inns)} организациям и сверяю их между собой...")
 
+    # облегчённый сбор (без финансов/ФССП/арбитража/проверок — они тут не нужны) —
+    # быстрее и не сжигает дневной лимит Checko на пустом месте
     results = {}
-    names = {}
     for inn in inns:
         try:
-            result = await build_card(inn, DADATA_API_KEY, DADATA_SECRET_KEY, CHECKO_API_KEY)
+            result = await build_light_card(inn, DADATA_API_KEY, DADATA_SECRET_KEY, CHECKO_API_KEY)
         except Exception:
             logging.exception("Ошибка при проверке ИНН %s для поиска связей", inn)
             await message.answer(f"❌ {inn} — ошибка проверки, пропускаю")
@@ -723,11 +848,7 @@ async def receive_relations_inns(message: Message, state: FSMContext):
             await message.answer(f"❓ {inn} — не найдено, пропускаю")
             continue
         results[inn] = result
-        name = result.dadata.name_short if result.dadata and result.dadata.name_short else (
-            result.checko.name_short if result.checko else inn
-        )
-        names[inn] = name
-        await db.log_check(message.from_user.id, "counterparty", inn, f"{name} — поиск связей")
+        await db.log_check(message.from_user.id, "counterparty", inn, f"{company_name(result)} — поиск связей")
 
     if len(results) < 2:
         await message.answer("Не набралось хотя бы двух проверенных организаций для сравнения.", reply_markup=menu_for(message.from_user.id))
@@ -736,9 +857,14 @@ async def receive_relations_inns(message: Message, state: FSMContext):
 
     connections = find_connections(results)
 
+    try:
+        connections += await enrich_person_links(results, CHECKO_API_KEY)
+    except Exception:
+        logging.exception("Ошибка при поиске скрытых связей через физлиц")
+
     lines = [f"<b>🔗 Связи между {len(results)} организациями</b>", ""]
-    for inn, name in names.items():
-        lines.append(f"• {name} (ИНН {inn})")
+    for inn, result in results.items():
+        lines.append(f"• {company_name(result)} (ИНН {inn_link(inn)})")
     lines.append("")
 
     if not connections:
@@ -756,6 +882,17 @@ async def receive_relations_inns(message: Message, state: FSMContext):
     for i, chunk in enumerate(chunks):
         is_last = i == len(chunks) - 1
         await message.answer(chunk, reply_markup=menu_for(message.from_user.id) if is_last else None)
+
+    if connections:
+        try:
+            nodes = [{"inn": inn, "name": company_name(res)} for inn, res in results.items()]
+            png = render_connections_graph(nodes, graph_edges(connections), "Связи между организациями")
+            await message.answer_photo(
+                BufferedInputFile(png, filename="connections.png"),
+                caption="🔗 На каждой линии подписано, чем именно связаны организации",
+            )
+        except Exception:
+            logging.exception("Ошибка при рендере графа связей")
 
     await state.clear()
 
@@ -834,6 +971,9 @@ async def main():
     asyncio.create_task(_cleanup_loop())
 
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    me = await bot.get_me()
+    set_bot_username(me.username)
+
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
 
