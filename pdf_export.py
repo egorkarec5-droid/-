@@ -34,18 +34,10 @@ from links import inn_url
 
 # ───────────────────────── палитра ─────────────────────────
 
-NAVY = "#1B2A49"
-ACCENT = "#2F6FB5"
-INK = "#1F2933"
-MUTED = "#6B7787"
-LINE = "#DCE2EA"
-ZEBRA = "#F6F8FB"
-CARD = "#EEF2F8"
-LINK = "#1F5FBF"
+from theme import (
+    NAVY, ACCENT, INK, MUTED, LINE, ZEBRA, CARD, LINK, LEVEL_FG, LEVEL_BG, LEVEL_SOLID,
+)
 
-LEVEL_FG = {"low": "#1E7B34", "medium": "#9A5A00", "high": "#C0262D", "none": "#5B6675"}
-LEVEL_BG = {"low": "#E4F4E8", "medium": "#FFF1D6", "high": "#FBE3E4", "none": "#EDF0F4"}
-LEVEL_SOLID = {"low": "#2E8B48", "medium": "#D98A00", "high": "#C8323A", "none": "#6B7787"}
 LEVEL_ORDER = {"none": -1, "low": 0, "medium": 1, "high": 2}
 
 PAGE_W, PAGE_H = A4
