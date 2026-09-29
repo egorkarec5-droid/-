@@ -17,6 +17,13 @@ def set_bot_username(username: str | None) -> None:
     _BOT_USERNAME = username or ""
 
 
+def inn_url(inn: str) -> str:
+    """Ссылка на проверку ИНН в боте (для PDF) или пустая строка, если имя бота ещё не известно."""
+    if not _BOT_USERNAME or not inn or not str(inn).isdigit():
+        return ""
+    return f"https://t.me/{_BOT_USERNAME}?start=inn_{inn}"
+
+
 def inn_link(inn: str, label: str | None = None) -> str:
     """ИНН в виде кликабельной ссылки; без имени бота или без ИНН — обычный текст."""
     text = label or inn
