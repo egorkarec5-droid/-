@@ -156,10 +156,14 @@ def find_connections(results: dict[str, "CardResult"]) -> list[Connection]:
                     kind = "общий директор"
                 elif ra == rb == {"учредитель"}:
                     kind = "общий учредитель"
+                elif ra == rb == {"директор", "учредитель"}:
+                    kind = "общий директор и учредитель"
                 elif "ИП" in ra or "ИП" in rb:
                     kind = "ИП↔" + _roles_str((ra | rb) - {"ИП"} or {"физлицо"})
+                elif ra == rb:
+                    kind = "общий человек: " + _roles_str(ra)
                 else:
-                    kind = "общее лицо: " + _roles_str(ra) + "↔" + _roles_str(rb)
+                    kind = "человек: " + _roles_str(ra) + " ↔ " + _roles_str(rb)
                 add(kind, f"{name} (ИНН {pid}): в «{name_a}» — {_roles_str(ra)}, в «{name_b}» — {_roles_str(rb)}")
 
             # 2) организационные связи (учредитель-организация, упр. организация, Checko-связи)
@@ -259,5 +263,5 @@ async def enrich_person_links(
     return unique
 
 
-def graph_edges(connections: list[Connection]) -> list[tuple[str, str, str]]:
-    return [(c.inn_a, c.inn_b, c.kind) for c in connections]
+def graph_edges(connections: list[Connection]) -> list[tuple[str, str, str, str]]:
+    return [(c.inn_a, c.inn_b, c.kind, c.detail) for c in connections]
