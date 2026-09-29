@@ -11,6 +11,7 @@ from checko_client import (
 )
 from company_analysis import analyze_nominal_director, analyze_shell_company, Verdict
 from npd_check import check_npd_status
+from links import inn_link
 
 
 @dataclass
@@ -280,11 +281,15 @@ def format_card(result: CardResult) -> str:
         if e.managed_orgs:
             lines.append(f"<b>Руководитель в организациях:</b> {len(e.managed_orgs)}")
             for o in e.managed_orgs[:3]:
-                lines.append(f"  • {o['name']} (ИНН {o['inn']}), {o['status']}")
+                lines.append(f"  • {o['name']} (ИНН {inn_link(o['inn'])}), {o['status']}")
+            if len(e.managed_orgs) > 3:
+                lines.append(f"  …и ещё {len(e.managed_orgs) - 3} — кнопка «Показать все» ниже")
         if e.founded_orgs:
             lines.append(f"<b>Учредитель в организациях:</b> {len(e.founded_orgs)}")
             for o in e.founded_orgs[:3]:
-                lines.append(f"  • {o['name']} (ИНН {o['inn']}), {o['status']}")
+                lines.append(f"  • {o['name']} (ИНН {inn_link(o['inn'])}), {o['status']}")
+            if len(e.founded_orgs) > 3:
+                lines.append(f"  …и ещё {len(e.founded_orgs) - 3} — кнопка «Показать все» ниже")
 
     if result.person and not result.entrepreneur:
         p = result.person
@@ -301,11 +306,15 @@ def format_card(result: CardResult) -> str:
         if p.managed_orgs:
             lines.append(f"<b>Руководитель в организациях:</b> {len(p.managed_orgs)}")
             for o in p.managed_orgs[:5]:
-                lines.append(f"  • {o['name']} (ИНН {o['inn']}), {o['status']}")
+                lines.append(f"  • {o['name']} (ИНН {inn_link(o['inn'])}), {o['status']}")
+            if len(p.managed_orgs) > 5:
+                lines.append(f"  …и ещё {len(p.managed_orgs) - 5} — кнопка «Показать все» ниже")
         if p.founded_orgs:
             lines.append(f"<b>Учредитель в организациях:</b> {len(p.founded_orgs)}")
             for o in p.founded_orgs[:5]:
-                lines.append(f"  • {o['name']} (ИНН {o['inn']}), {o['status']}")
+                lines.append(f"  • {o['name']} (ИНН {inn_link(o['inn'])}), {o['status']}")
+            if len(p.founded_orgs) > 5:
+                lines.append(f"  …и ещё {len(p.founded_orgs) - 5} — кнопка «Показать все» ниже")
         if p.ip_records:
             lines.append(f"<b>Статус ИП:</b> {len(p.ip_records)} запись(ей)")
 
@@ -363,7 +372,7 @@ def format_card(result: CardResult) -> str:
         m = d.management
         inn = m.inn or (current_director.inn if current_director and current_director.name == m.name else "")
         post = current_director.post if current_director and current_director.name == m.name else m.post
-        lines.append(f"{m.name}" + (f" (ИНН {inn})" if inn else "") + (f", {post}" if post else ""))
+        lines.append(f"{m.name}" + (f" (ИНН {inn_link(inn)})" if inn else "") + (f", {post}" if post else ""))
         if c and c.managing_org and c.managing_org.inn == m.inn:
             tag = " 🔴 недостоверность" if c.managing_org.unreliable else ""
             lines.append(f"(управляющая организация{tag})")
@@ -372,7 +381,7 @@ def format_card(result: CardResult) -> str:
         lines.append("<b>Руководитель</b>")
         mo = c.managing_org
         tag = " 🔴 недостоверность" if mo.unreliable else ""
-        lines.append(f"{mo.name} (ИНН {mo.inn}) — управляющая организация{tag}")
+        lines.append(f"{mo.name} (ИНН {inn_link(mo.inn)}) — управляющая организация{tag}")
     elif current_director:
         lines.append("")
         lines.append("<b>Руководитель</b>")
@@ -385,7 +394,7 @@ def format_card(result: CardResult) -> str:
             marks += " 🔴 недостоверность"
         lines.append(
             f"{current_director.name}"
-            + (f" (ИНН {current_director.inn})" if current_director.inn else "")
+            + (f" (ИНН {inn_link(current_director.inn)})" if current_director.inn else "")
             + (f", {current_director.post}" if current_director.post else "")
             + marks
         )
@@ -404,7 +413,7 @@ def format_card(result: CardResult) -> str:
                 marks += " 🔴 массовый руководитель"
             if dir_.unreliable:
                 marks += " 🔴 недостоверность"
-            lines.append(f"• {dir_.name}" + (f" (ИНН {dir_.inn})" if dir_.inn else "") + (f", {dir_.post}" if dir_.post else "") + period + marks)
+            lines.append(f"• {dir_.name}" + (f" (ИНН {inn_link(dir_.inn)})" if dir_.inn else "") + (f", {dir_.post}" if dir_.post else "") + period + marks)
 
     founders_all = list(d.founders) if d and d.founders else []
     if c and c.founders:
@@ -425,7 +434,7 @@ def format_card(result: CardResult) -> str:
                 marks += " 🔴 массовый учредитель"
             if getattr(f, "unreliable", False):
                 marks += " 🔴 недостоверность"
-            lines.append(f"• {f.name}" + (f" (ИНН {f.inn})" if f.inn else "") + share + kind + marks)
+            lines.append(f"• {f.name}" + (f" (ИНН {inn_link(f.inn)})" if f.inn else "") + share + kind + marks)
 
     if c:
         lines.append("")
@@ -475,10 +484,11 @@ def format_card(result: CardResult) -> str:
         lines.append("")
         lines.append(f"<b>Связанные организации</b> ({len(c.related_orgs)})")
         for r in c.related_orgs[:5]:
-            status_mark = "🔴" if r.get("status") and "не действ" in r.get("status", "").lower() else "🟢"
-            lines.append(f"{status_mark} {r.get('name', '')}" + (f" (ИНН {r['inn']})" if r.get("inn") else ""))
+            status_mark = _status_mark(r.get("status"))
+            kind_str = f" — {r['kind']}" if r.get("kind") else ""
+            lines.append(f"{status_mark} {r.get('name', '')}" + (f" (ИНН {inn_link(r['inn'])})" if r.get("inn") else "") + kind_str)
         if len(c.related_orgs) > 5:
-            lines.append(f"…и ещё {len(c.related_orgs) - 5}")
+            lines.append(f"…и ещё {len(c.related_orgs) - 5} — кнопка «Показать все» ниже")
 
     if result.enforcements:
         total_debt = sum(e.debt_remaining or e.debt_sum or 0 for e in result.enforcements)
@@ -489,7 +499,7 @@ def format_card(result: CardResult) -> str:
             sum_str = f"{(e.debt_remaining or e.debt_sum or 0):,.0f} ₽".replace(",", " ")
             lines.append(f"• №{e.number} от {e.date} — {e.subject}, {sum_str}")
         if len(result.enforcements) > 3:
-            lines.append(f"…и ещё {len(result.enforcements) - 3}")
+            lines.append(f"…и ещё {len(result.enforcements) - 3} — кнопка «Показать все» ниже")
 
     if result.legal_cases and result.legal_cases.cases:
         lc = result.legal_cases
@@ -503,7 +513,7 @@ def format_card(result: CardResult) -> str:
             link = f"https://kad.arbitr.ru/Card/{c_.uuid}" if c_.uuid else c_.kad_url
             lines.append(f"• №{c_.number} от {c_.date} — {c_.role}{sum_str}" + (f"\n  {link}" if link else ""))
         if len(lc.cases) > 3:
-            lines.append(f"…и ещё {len(lc.cases) - 3}")
+            lines.append(f"…и ещё {len(lc.cases) - 3} — кнопка «Показать все» ниже")
 
     if result.inspections:
         with_violations = [i for i in result.inspections if i.violations_found]
@@ -524,7 +534,7 @@ def format_card(result: CardResult) -> str:
             price_str = f", {ct.price:,.0f} ₽".replace(",", " ") if ct.price else ""
             lines.append(f"• №{ct.reg_number} от {ct.date} — {role}{price_str}" + (f"\n  {obj}" if obj else "") + (f"\n  {ct.eis_url}" if ct.eis_url else ""))
         if len(result.contracts) > 3:
-            lines.append(f"…и ещё {len(result.contracts) - 3}")
+            lines.append(f"…и ещё {len(result.contracts) - 3} — кнопка «Показать все» ниже")
 
     if result.bankruptcy_messages:
         lines.append("")
@@ -533,7 +543,7 @@ def format_card(result: CardResult) -> str:
             case_str = f", дело №{b.case_number}" if b.case_number else ""
             lines.append(f"• {b.date} — {b.type_name}{case_str}" + (f"\n  {b.url}" if b.url else ""))
         if len(result.bankruptcy_messages) > 3:
-            lines.append(f"…и ещё {len(result.bankruptcy_messages) - 3}")
+            lines.append(f"…и ещё {len(result.bankruptcy_messages) - 3} — кнопка «Показать все» ниже")
 
     if result.fedresurs:
         lines.append("")
@@ -541,7 +551,7 @@ def format_card(result: CardResult) -> str:
         for f in sorted(result.fedresurs, key=lambda x: x.date, reverse=True)[:3]:
             lines.append(f"• {f.date} — {f.type_name}" + (f"\n  {f.url}" if f.url else ""))
         if len(result.fedresurs) > 3:
-            lines.append(f"…и ещё {len(result.fedresurs) - 3}")
+            lines.append(f"…и ещё {len(result.fedresurs) - 3} — кнопка «Показать все» ниже")
 
     if result.timeline:
         lines.append("")
@@ -640,4 +650,244 @@ def split_for_telegram(text: str, max_len: int = 900) -> list[str]:
             current = candidate
     if current:
         chunks.append(current)
+    # страховка от лимита Telegram (4096): если одна секция (список без пустых строк)
+    # оказалась гигантской — режем её по строкам
+    safe: list[str] = []
+    for ch in chunks or [text]:
+        safe.extend(chunk_lines(ch, 3800) if len(ch) > 3800 else [ch])
+    return safe
+
+
+# ───────────────────────── общие мелочи ─────────────────────────
+
+def _status_mark(status: str | None) -> str:
+    """🔴 для недействующих/ликвидированных организаций, 🟢 для остальных."""
+    s = (status or "").lower()
+    bad = any(w in s for w in ("не действ", "ликвид", "прекращ", "исключ"))
+    return "🔴" if bad else "🟢"
+
+
+def _org_active(status: str | None) -> bool:
+    return _status_mark(status) == "🟢"
+
+
+def _org_row(r: dict) -> str:
+    inn = r.get("inn") or ""
+    kind = f" — {r['kind']}" if r.get("kind") else ""
+    inn_part = f" (ИНН {inn_link(inn)})" if inn else ""
+    status = f", {r['status']}" if r.get("status") else ""
+    return f"{_status_mark(r.get('status'))} {r.get('name') or '—'}{inn_part}{status}{kind}"
+
+
+# ─────────────── кнопки «Показать все» под карточкой ───────────────
+# В карточке длинные списки обрезаны («…и ещё N»). Ключ секции + ИНН уходят в
+# callback-кнопку, по нажатию бот заново запрашивает именно эту секцию и
+# присылает её ПОЛНОСТЬЮ.
+
+def expandable_sections(result: "CardResult") -> list[tuple[str, str]]:
+    """[(ключ секции, подпись кнопки)] для списков, показанных в карточке не полностью."""
+    out: list[tuple[str, str]] = []
+    c = result.checko
+    if c and len(c.related_orgs) > 5:
+        out.append(("rel", f"➕ Все связанные организации ({len(c.related_orgs)})"))
+
+    e, p = result.entrepreneur, result.person
+    if e and (len(e.managed_orgs) > 3 or len(e.founded_orgs) > 3):
+        out.append(("org", f"➕ Все организации ИП ({len(e.managed_orgs) + len(e.founded_orgs)})"))
+    elif p and not e and (len(p.managed_orgs) > 5 or len(p.founded_orgs) > 5):
+        out.append(("org", f"➕ Все организации ({len(p.managed_orgs) + len(p.founded_orgs)})"))
+
+    if len(result.enforcements) > 3:
+        out.append(("enf", f"➕ Все ФССП ({len(result.enforcements)})"))
+    if result.legal_cases and len(result.legal_cases.cases) > 3:
+        out.append(("cas", f"➕ Все арбитражные дела ({len(result.legal_cases.cases)})"))
+    if len(result.contracts) > 3:
+        out.append(("ctr", f"➕ Все госконтракты ({len(result.contracts)})"))
+    if len(result.bankruptcy_messages) > 3:
+        out.append(("bnk", f"➕ Все записи ЕФРСБ ({len(result.bankruptcy_messages)})"))
+    if len(result.fedresurs) > 3:
+        out.append(("fed", f"➕ Все сообщения Федресурса ({len(result.fedresurs)})"))
+    if len(result.timeline) > 5:
+        out.append(("tln", f"➕ Вся история изменений ({len(result.timeline)})"))
+    return out
+
+
+async def fetch_and_format_section(key: str, inn: str, checko_key: str) -> str:
+    """Полный (не обрезанный) вид одной секции карточки. Запрашивает только нужный метод Checko."""
+    if key == "rel":
+        c = await get_company(inn, checko_key)
+        rows = c.related_orgs if c else []
+        head = f"<b>Связанные организации</b> — {len(rows)}"
+        body = [_org_row(r) for r in rows]
+
+    elif key == "org":
+        e = await get_entrepreneur(inn, checko_key) if len(inn) == 12 else None
+        p = await get_person(inn, checko_key) if len(inn) == 12 else None
+        managed = list((e.managed_orgs if e else []) or (p.managed_orgs if p else []))
+        founded = list((e.founded_orgs if e else []) or (p.founded_orgs if p else []))
+        head = f"<b>Организации</b> — руководитель: {len(managed)}, учредитель: {len(founded)}"
+        body = []
+        if managed:
+            body.append("<b>Руководитель в:</b>")
+            body += [_org_row(r) for r in managed]
+        if founded:
+            body.append("")
+            body.append("<b>Учредитель в:</b>")
+            body += [_org_row(r) for r in founded]
+
+    elif key == "enf":
+        items = await get_enforcements(inn, checko_key)
+        total = sum(x.debt_remaining or x.debt_sum or 0 for x in items)
+        head = f"<b>Исполнительные производства (ФССП)</b> — {len(items)}, непогашено {total:,.0f} ₽".replace(",", " ")
+        body = []
+        for x in items:
+            s = f"{(x.debt_remaining or x.debt_sum or 0):,.0f} ₽".replace(",", " ")
+            body.append(f"• №{x.number} от {x.date} — {x.subject}, {s}")
+
+    elif key == "cas":
+        lc = await get_legal_cases(inn, checko_key)
+        head = f"<b>Арбитражные дела</b> — {len(lc.cases)}, сумма исков {lc.total_claim_sum:,.0f} ₽".replace(",", " ")
+        body = []
+        for x in sorted(lc.cases, key=lambda z: z.date, reverse=True):
+            s = f", {x.claim_sum:,.0f} ₽".replace(",", " ") if x.claim_sum else ""
+            link = f"https://kad.arbitr.ru/Card/{x.uuid}" if x.uuid else x.kad_url
+            body.append(f"• №{x.number} от {x.date} — {x.role}{s}" + (f"\n  {link}" if link else ""))
+
+    elif key == "ctr":
+        items = await get_contracts(inn, checko_key, law="44", limit=100)
+        head = f"<b>Госконтракты (44-ФЗ)</b> — {len(items)}"
+        body = []
+        for x in sorted(items, key=lambda z: z.date, reverse=True):
+            role = "заказчик" if x.customer_inn == inn else "поставщик"
+            s = f", {x.price:,.0f} ₽".replace(",", " ") if x.price else ""
+            obj = f"\n  {x.objects[0]}" if x.objects else ""
+            link = f"\n  {x.eis_url}" if x.eis_url else ""
+            body.append(f"• №{x.reg_number} от {x.date} — {role}{s}{obj}{link}")
+
+    elif key == "bnk":
+        items = await get_bankruptcy_messages(inn, checko_key, limit=100)
+        head = f"<b>Записи ЕФРСБ (банкротство)</b> — {len(items)}"
+        body = []
+        for x in sorted(items, key=lambda z: z.date, reverse=True):
+            case = f", дело №{x.case_number}" if x.case_number else ""
+            body.append(f"• {x.date} — {x.type_name}{case}" + (f"\n  {x.url}" if x.url else ""))
+
+    elif key == "fed":
+        items = await get_fedresurs(inn, checko_key, limit=100)
+        head = f"<b>Сообщения Федресурса</b> — {len(items)}"
+        body = [f"• {x.date} — {x.type_name}" + (f"\n  {x.url}" if x.url else "")
+                for x in sorted(items, key=lambda z: z.date, reverse=True)]
+
+    elif key == "tln":
+        items = await get_timeline(inn, checko_key)
+        head = f"<b>История изменений</b> — {len(items)}"
+        body = [f"• {x.date} — {x.text}" for x in items]
+
+    else:
+        return "Неизвестный раздел."
+
+    if not body:
+        return head + "\nДанных нет."
+    return head + "\n" + "\n".join(body)
+
+
+def chunk_lines(text: str, max_len: int = 3500) -> list[str]:
+    """Режет длинный текст по строкам (не посреди строки/ссылки) на части до max_len —
+    для полных списков, где 'пустых строк между секциями' нет вообще."""
+    chunks, cur = [], ""
+    for line in text.split("\n"):
+        if cur and len(cur) + 1 + len(line) > max_len:
+            chunks.append(cur)
+            cur = line
+        else:
+            cur = f"{cur}\n{line}" if cur else line
+    if cur:
+        chunks.append(cur)
     return chunks or [text]
+
+
+# ───────────── данные для схемы связей (с подписью типа связи) ─────────────
+
+def relation_scheme_data(result: "CardResult") -> tuple[str, list[dict]]:
+    """(название центра, строки схемы). Каждая строка: name, inn, active, label —
+    label говорит, ЧЕМ организация связана с проверяемой (общий учредитель / руководитель и т.д.)."""
+    center = (
+        (result.dadata.name_short if result.dadata else None)
+        or (result.checko.name_short if result.checko else None)
+        or (result.entrepreneur.fio if result.entrepreneur else None)
+        or (result.person.fio if result.person else None)
+        or result.inn
+    )
+    raw: list[dict] = []
+    if result.checko:
+        raw += result.checko.related_orgs
+    if result.entrepreneur:
+        raw += result.entrepreneur.managed_orgs + result.entrepreneur.founded_orgs
+    elif result.person:
+        raw += result.person.managed_orgs + result.person.founded_orgs
+
+    merged: dict[str, dict] = {}
+    for r in raw:
+        key = r.get("inn") or r.get("name") or str(len(merged))
+        label = r.get("kind") or "связь"
+        if key in merged:
+            if label not in merged[key]["labels"]:
+                merged[key]["labels"].append(label)
+        else:
+            merged[key] = {
+                "name": r.get("name") or "—",
+                "inn": r.get("inn") or "—",
+                "active": _org_active(r.get("status")),
+                "labels": [label],
+            }
+    rows = [
+        {"name": m["name"], "inn": m["inn"], "active": m["active"], "label": "; ".join(m["labels"])}
+        for m in merged.values()
+    ]
+    return center, rows
+
+
+# ─────────── облегчённая сборка для «Найти связи» ───────────
+
+async def build_light_card(inn: str, dadata_key: str, dadata_secret: str, checko_key: str) -> CardResult:
+    """Только то, что нужно для сопоставления организаций между собой (руководители,
+    учредители, адрес, контакты, госконтракты). Без финансов, ФССП, арбитража, проверок
+    и оценки надёжности — в разы быстрее и дешевле по лимитам API, чем полная карточка."""
+    is_person_inn = len(inn) == 12
+
+    async def _dadata():
+        try:
+            return await get_party(inn, dadata_key, dadata_secret)
+        except DaDataError:
+            return None
+
+    async def _checko():
+        try:
+            return await get_company(inn, checko_key)
+        except CheckoError:
+            return None
+
+    async def _entrepreneur():
+        if not is_person_inn:
+            return None
+        try:
+            return await get_entrepreneur(inn, checko_key)
+        except CheckoError:
+            return None
+
+    async def _person():
+        if not is_person_inn:
+            return None
+        try:
+            return await get_person(inn, checko_key)
+        except CheckoError:
+            return None
+
+    async def _contracts():
+        try:
+            return await get_contracts(inn, checko_key, law="44", limit=100)
+        except CheckoError:
+            return []
+
+    d, c, e, p, ct = await asyncio.gather(_dadata(), _checko(), _entrepreneur(), _person(), _contracts())
+    return CardResult(inn=inn, dadata=d, checko=c, entrepreneur=e, person=p, contracts=ct)
