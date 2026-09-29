@@ -503,7 +503,12 @@ async def run_analysis(message: Message, state: FSMContext, purchases_path: str 
     if len(top_for_scheme) >= 2:
         try:
             flow_rows = [
-                FlowRow(name=summaries[inn].name, inn=inn, amount=summaries[inn].total_turnover, level=a.level)
+                FlowRow(
+                    name=summaries[inn].name, inn=inn, amount=summaries[inn].total_turnover, level=a.level,
+                    purchase=summaries[inn].purchase_total, sale=summaries[inn].sale_total,
+                    transit=any(f.code == "transit" for f in a.flags),
+                    score=a.score, reasons=[f.label for f in a.flags],
+                )
                 for inn, a in top_for_scheme
             ]
             png = render_money_flow("Наша организация", flow_rows)
@@ -670,10 +675,11 @@ async def process_inn(message: Message, inn: str):
         try:
             rows_all = scheme["rows"]
             rel_rows = [
-                RelationRow(name=r["name"], inn=r["inn"], active=r["active"], label=r.get("label", ""))
+                RelationRow(name=r["name"], inn=r["inn"], active=r["active"], label=r.get("label", ""),
+                            status=r.get("status", ""))
                 for r in rows_all[:6]
             ]
-            png = render_relations(scheme["center"], rel_rows)
+            png = render_relations(scheme["center"], rel_rows, total=len(rows_all))
             caption = "🔗 Схема связей — на линиях подписано, чем связаны организации"
             if len(rows_all) > 6:
                 caption += f" (показаны 6 из {len(rows_all)})"
@@ -910,7 +916,7 @@ async def receive_relations_inns(message: Message, state: FSMContext):
             png = render_connections_graph(nodes, graph_edges(connections), "Связи между организациями")
             await message.answer_photo(
                 BufferedInputFile(png, filename="connections.png"),
-                caption="🔗 На каждой линии подписано, чем именно связаны организации",
+                caption="🔗 Линии пронумерованы и окрашены по типу связи — расшифровка под схемой",
             )
         except Exception:
             logging.exception("Ошибка при рендере графа связей")
