@@ -838,10 +838,11 @@ def relation_scheme_data(result: "CardResult") -> tuple[str, list[dict]]:
                 "name": r.get("name") or "—",
                 "inn": r.get("inn") or "—",
                 "active": _org_active(r.get("status")),
+                "status": r.get("status") or "",
                 "labels": [label],
             }
     rows = [
-        {"name": m["name"], "inn": m["inn"], "active": m["active"], "label": "; ".join(m["labels"])}
+        {"name": m["name"], "inn": m["inn"], "active": m["active"], "status": m["status"], "label": "; ".join(m["labels"])}
         for m in merged.values()
     ]
     return center, rows
